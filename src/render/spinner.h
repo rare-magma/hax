@@ -67,16 +67,26 @@ void spinner_request_label(struct spinner *spinner, const char *key, const char 
  * counter with zero. The counter appears only for long waits and never on tool-status rows. */
 void spinner_set_timer(struct spinner *spinner, long started_at_ms);
 
+/* Replace the optional copied metadata prefix on labeled rows. NULL or empty values clear it;
+ * metadata is not shown on tool-status rows. */
+void spinner_set_live_info(struct spinner *spinner, const char *info);
+
 /* Return a borrowed, NUL-terminated one-cell UTF-8 glyph selected from monotonic time. */
 const char *spinner_glyph_now(void);
+
+struct buf;
+
+/* Build one complete labeled-row repaint. The frame is terminal-independent apart from its fixed
+ * ANSI repaint controls. `elapsed_ms` is negative when the timer is disabled. Metadata is included
+ * as a whole only when it and the untruncated label fit the row. */
+void spinner_build_label_frame(struct buf *frame, const char *label, const char *info,
+                               const char *glyph, long elapsed_ms, int terminal_cols);
 
 /* Cell widths of the physical rows painted by one tool-view frame, for reflow-aware repaints. */
 struct spinner_tool_frame {
     int row_widths[SPINNER_TOOL_VIEW_ROWS_MAX];
     int row_count;
 };
-
-struct buf;
 
 /* Append one synchronized tool-view repaint frame: climb over the previous frame (NULL on first
  * paint), then overprint every row before erasing stale tails, so terminals without synchronized

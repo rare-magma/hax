@@ -7,6 +7,11 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Added
+
+- Interactive progress indicators show the latest reported context use and cumulative session spend,
+  including an approximation marker when the cost is estimated.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added

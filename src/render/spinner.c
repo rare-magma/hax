@@ -52,6 +52,7 @@ struct spinner {
     long contradicted_since_ms;
 
     long timer_started_at_ms;
+    char *live_info;
     int parked_rows;
     int origin_col;
     /* A swap bracket opened by spinner_swap_begin() and not yet closed. */
@@ -78,42 +79,68 @@ const char *spinner_glyph_now(void)
     return SPINNER_FRAMES[frame];
 }
 
-/* Erasing the old row tail after repaint avoids a blank frame without synchronized output. */
-static void finish_row_repaint(void)
+void spinner_build_label_frame(struct buf *frame, const char *label, const char *info,
+                               const char *glyph, long elapsed_ms, int terminal_cols)
 {
-    fputs(ANSI_RESET ANSI_ERASE_LINE, stdout);
-    fflush(stdout);
+    /* Reserve the last terminal column because filling it can trigger deferred autowrap. */
+    int label_budget = terminal_cols - 1 - 2; /* glyph and separating space */
+    if (label_budget < 0)
+        label_budget = 0;
+
+    const char *safe_label = label ? label : "";
+    const char *safe_info = info && *info ? info : NULL;
+    int has_duration = elapsed_ms >= TIMER_MIN_MS;
+    struct buf prefix;
+    buf_init(&prefix);
+
+    if (has_duration) {
+        char duration[32];
+        format_duration_steady(duration, sizeof(duration), elapsed_ms);
+        buf_append_str(&prefix, duration);
+    }
+    if (safe_info) {
+        if (prefix.len > 0)
+            buf_append_str(&prefix, " \xC2\xB7 ");
+        buf_append_str(&prefix, safe_info);
+    }
+
+    int include_prefix = 0;
+    int prefix_label_separator_cells = has_duration && !safe_info ? 3 : 1;
+    if (prefix.len > 0) {
+        size_t prefix_cells = display_cells(prefix.data);
+        include_prefix = prefix_cells + prefix_label_separator_cells + display_cells(safe_label) <=
+                         (size_t)label_budget;
+    }
+
+    buf_append_str(frame, "\r" ANSI_DIM);
+    buf_append_str(frame, glyph ? glyph : "");
+    buf_append_str(frame, " ");
+    if (include_prefix) {
+        buf_append(frame, prefix.data, prefix.len);
+        buf_append_str(frame, has_duration && !safe_info ? " \xC2\xB7 " : " ");
+        label_budget -= (int)display_cells(prefix.data) + prefix_label_separator_cells;
+    }
+
+    char *clipped_label = truncate_for_display(safe_label, (size_t)label_budget);
+    buf_append_str(frame, clipped_label);
+    free(clipped_label);
+    buf_append_str(frame, ANSI_RESET ANSI_ERASE_LINE);
+    buf_free(&prefix);
 }
 
 static void draw_label_row_locked(struct spinner *spinner, const char *glyph)
 {
-    /* Reserve the last terminal column because filling it can trigger deferred autowrap. */
-    int label_budget = term_width() - 1 - 2; /* glyph and separating space */
-    if (label_budget < 0)
-        label_budget = 0;
+    long elapsed_ms = -1;
+    if (spinner->timer_started_at_ms > 0)
+        elapsed_ms = monotonic_ms() - spinner->timer_started_at_ms;
 
-    fputs("\r" ANSI_DIM, stdout);
-    fputs(glyph, stdout);
-    fputc(' ', stdout);
-
-    if (spinner->timer_started_at_ms > 0) {
-        long elapsed_ms = monotonic_ms() - spinner->timer_started_at_ms;
-        if (elapsed_ms >= TIMER_MIN_MS) {
-            char duration[32];
-            format_duration_steady(duration, sizeof(duration), elapsed_ms);
-            size_t prefix_cells = strlen(duration) + 3; /* spaces and middle dot */
-            if (prefix_cells + display_cells(spinner->displayed_label) <= (size_t)label_budget) {
-                fputs(duration, stdout);
-                fputs(" \xC2\xB7 ", stdout);
-                label_budget -= (int)prefix_cells;
-            }
-        }
-    }
-
-    char *label = truncate_for_display(spinner->displayed_label, (size_t)label_budget);
-    fputs(label, stdout);
-    free(label);
-    finish_row_repaint();
+    struct buf frame;
+    buf_init(&frame);
+    spinner_build_label_frame(&frame, spinner->displayed_label, spinner->live_info, glyph,
+                              elapsed_ms, term_width());
+    fwrite(frame.data ? frame.data : "", 1, frame.len, stdout);
+    fflush(stdout);
+    buf_free(&frame);
 }
 
 /* The animated gutter overprints the row's first cell, so it must follow the row's erase. */
@@ -468,6 +495,27 @@ void spinner_set_timer(struct spinner *spinner, long started_at_ms)
     pthread_mutex_unlock(&spinner->mutex);
 }
 
+void spinner_set_live_info(struct spinner *spinner, const char *info)
+{
+    if (!spinner)
+        return;
+
+    pthread_mutex_lock(&spinner->mutex);
+    char *new_info = info && *info ? xstrdup(info) : NULL;
+    if ((!spinner->live_info && !new_info) ||
+        (spinner->live_info && new_info && strcmp(spinner->live_info, new_info) == 0)) {
+        free(new_info);
+        pthread_mutex_unlock(&spinner->mutex);
+        return;
+    }
+
+    free(spinner->live_info);
+    spinner->live_info = new_info;
+    if (spinner->mode == SPINNER_LABEL)
+        draw_frame_locked(spinner);
+    pthread_mutex_unlock(&spinner->mutex);
+}
+
 static void hide_locked(struct spinner *spinner)
 {
     spinner->label_show_pending = 0;
@@ -614,6 +662,7 @@ void spinner_free(struct spinner *spinner)
     pthread_cond_destroy(&spinner->wake);
     free(spinner->displayed_label);
     free(spinner->displayed_key);
+    free(spinner->live_info);
     free(spinner->pending_label);
     free(spinner->pending_key);
     free(spinner);

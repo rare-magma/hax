@@ -122,6 +122,27 @@ double agent_session_spend(const struct session_stats *stats, int *estimated)
     return agent_spend_total(&stats->spend, estimated);
 }
 
+static void update_spinner_live_info(struct render_ctx *render, const struct session_stats *stats)
+{
+    int estimated = 0;
+    double spend = agent_session_spend(stats, &estimated);
+    long context_tokens = stats->latest_context_tokens > 0 ? stats->latest_context_tokens : -1;
+    char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
+    int segment_count =
+        agent_format_stats_segments(segments, context_tokens, stats->context_limit, -1, spend,
+                                    estimated);
+
+    struct buf info;
+    buf_init(&info);
+    for (int i = 0; i < segment_count; i++) {
+        if (i > 0)
+            buf_append_str(&info, " \xC2\xB7 ");
+        buf_append_str(&info, segments[i]);
+    }
+    spinner_set_live_info(render->spinner, info.data ? info.data : NULL);
+    buf_free(&info);
+}
+
 /* Ordinary turns and compaction account request counts and window snapshots differently. */
 static void stats_account_usage(struct session_stats *stats, const struct stream_usage *usage,
                                 const struct provider *provider, const char *model)
@@ -1044,7 +1065,13 @@ struct repl_loop_ctx {
 static int repl_loop_on_event(const struct stream_event *event, void *user)
 {
     struct repl_loop_ctx *ctx = user;
-    return render_on_event(event, ctx->state->render);
+    struct agent_state *state = ctx->state;
+    if (event->kind == EV_RETRY && event->u.retry.usage) {
+        stats_account_usage(&state->stats, event->u.retry.usage, state->provider,
+                            state->session->model);
+        update_spinner_live_info(state->render, &state->stats);
+    }
+    return render_on_event(event, state->render);
 }
 
 static int repl_loop_tick(void *user)
@@ -1074,9 +1101,10 @@ static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *us
         stats->context_limit = model_meta_context(provider, session->model);
     }
     /* Retried attempts are separate spend records: merging could void an exact terminal
-     * charge over their unpriced tokens. The context snapshot above stays terminal-only. */
+     * charge over their unpriced tokens. Retry usage was accounted at EV_RETRY; the context
+     * snapshot above stays terminal-only. */
     stats_account_usage(stats, usage, provider, session->model);
-    stats_account_usage(stats, &loop_turn->retry_usage, provider, session->model);
+    update_spinner_live_info(ctx->state->render, stats);
 }
 
 static int repl_loop_checkpoint(void *user)
@@ -1392,6 +1420,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         /* Reset promoted spinner state before timing the new user turn. */
         spinner_set_label(render.spinner, "working", "working...");
+        update_spinner_live_info(&render, &state.stats);
         spinner_set_timer(render.spinner, user_turn_start_ms);
 
         /* Clear stale editor interrupts before arming first-Esc pause and second-Esc abort. */
@@ -1435,6 +1464,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         /* Close active rendering before post-turn output can emit terminal control sequences. */
         render_set_mode(&render, RENDER_IDLE);
+        spinner_set_live_info(render.spinner, NULL);
 
         /* History and the resume hint already expose interruptions; another live marker duplicates
          * them. */
