@@ -5,8 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buf.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 
 void anthropic_events_init(struct anthropic_events *parser, stream_cb callback, void *callback_user)
 {

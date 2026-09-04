@@ -2,9 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buf.h"
 #include "harness.h"
-#include "util.h"
 #include "render/markdown_wrap.h"
+#include "system/locale.h"
 #include "terminal/ansi.h"
 
 #define BLD    ANSI_BOLD

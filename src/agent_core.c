@@ -6,7 +6,9 @@
 
 #include "agent_env.h"
 #include "agent_usage.h"
+#include "buf.h"
 #include "config.h"
+#include "diag.h"
 #include "effort.h"
 #include "model_meta.h"
 #include "provider.h"
@@ -14,7 +16,7 @@
 #include "tool.h"
 #include "transcript.h"
 #include "turn.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/registry.h"
 #include "tools/bash_env.h"
 #include "tools/task_registry.h"
@@ -189,8 +191,8 @@ const char *agent_provider_log_name(const struct provider *provider)
 int agent_recording_enabled(const struct provider *provider)
 {
     const char *id = agent_provider_id(provider);
-    const struct provider_factory *factory = id ? provider_find(id) : NULL;
-    return !config_bool_or("no_session", factory && factory->internal);
+    const struct provider_def *def = id ? provider_find(id) : NULL;
+    return !config_bool_or("no_session", def && def->internal);
 }
 
 /* Keep subprocess inheritance synchronized at every settings-resolution point. */
@@ -264,7 +266,7 @@ int agent_session_resync_effort(struct agent_session *session, struct provider *
         return 0;
     /* Bounded: this runs on the interactive foreground thread, and a router-autoload probe can
      * take minutes. A late report refines effort before the next prompt instead. */
-    model_meta_wait_ms(provider, MODEL_META_PROBE_WAIT_MS);
+    model_meta_wait_ms(provider, MODEL_META_WAIT_MS);
     char *effort = resolve_effort(provider, session->model);
     int unchanged = (!effort && !session->effort) ||
                     (effort && session->effort && strcmp(effort, session->effort) == 0);
@@ -343,18 +345,6 @@ void agent_session_add_boundary(struct agent_session *session)
     agent_session_append(session, (struct item){.kind = ITEM_TURN_BOUNDARY});
 }
 
-/* An interrupted tool may already carry the marker as its output suffix. */
-static int tool_result_has_interrupt_marker(const struct item *it)
-{
-    if (it->kind != ITEM_TOOL_RESULT || !it->output)
-        return 0;
-    size_t out_len = strlen(it->output);
-    size_t marker_len = strlen(INTERRUPT_MARKER);
-    if (out_len < marker_len)
-        return 0;
-    return strcmp(it->output + out_len - marker_len, INTERRUPT_MARKER) == 0;
-}
-
 void agent_session_mark_interrupt(struct agent_session *session)
 {
     /* Look past inert trailing items (usage footers, boundaries) to the
@@ -365,13 +355,56 @@ void agent_session_mark_interrupt(struct agent_session *session)
     while (i > 0 && (session->items[i - 1].kind == ITEM_TURN_USAGE ||
                      session->items[i - 1].kind == ITEM_TURN_BOUNDARY))
         i--;
-    if (i > 0 && tool_result_has_interrupt_marker(&session->items[i - 1]))
+    /* A tail already carrying interrupt provenance — a killed tool's result or a skipped
+     * call — reads as interrupted without a second marker. */
+    if (i > 0 && (session->items[i - 1].origin == ITEM_ORIGIN_INTERRUPTED ||
+                  session->items[i - 1].origin == ITEM_ORIGIN_SKIPPED))
         return;
     agent_session_append(session, (struct item){
                                       .kind = ITEM_ASSISTANT_MESSAGE,
                                       .text = xstrdup(INTERRUPT_MARKER),
                                       .origin = ITEM_ORIGIN_INTERRUPTED,
                                   });
+}
+
+enum agent_resume_tail agent_session_resume_tail(const struct agent_session *session)
+{
+    for (size_t i = session->n_items; i-- > 0;) {
+        const struct item *item = &session->items[i];
+        if (item->kind == ITEM_TURN_USAGE || item->kind == ITEM_TURN_BOUNDARY)
+            continue;
+        if (item->origin == ITEM_ORIGIN_INTERRUPTED || item->origin == ITEM_ORIGIN_SKIPPED)
+            return AGENT_RESUME_TAIL_MARKED;
+        /* A compaction seed is synthetic: the response it awaits is a fresh turn, not an
+         * answer to recorded user input. */
+        if (item->kind == ITEM_USER_MESSAGE && item->origin != ITEM_ORIGIN_COMPACT_SEED)
+            return AGENT_RESUME_TAIL_USER;
+        return AGENT_RESUME_TAIL_CLEAN;
+    }
+    return AGENT_RESUME_TAIL_EMPTY;
+}
+
+long agent_session_last_context_tokens(const struct agent_session *session)
+{
+    struct context window = agent_session_context(session);
+    /* Compaction appends its accepted attempt's footer right after the seed. It reports the
+     * summarized request, not the fresh window — reading it would immediately recompact the
+     * seed — so the scan stops before that run of footers. */
+    size_t floor = 0;
+    if (window.n_items > 0 && window.items[0].origin == ITEM_ORIGIN_COMPACT_SEED) {
+        floor = 1;
+        while (floor < window.n_items && window.items[floor].kind == ITEM_TURN_USAGE)
+            floor++;
+    }
+    for (size_t i = window.n_items; i-- > floor;) {
+        const struct item *item = &window.items[i];
+        if (item->kind != ITEM_TURN_USAGE || !item->usage)
+            continue;
+        const struct stream_usage *usage = &item->usage->usage;
+        if (usage->input_tokens >= 0 && usage->output_tokens >= 0)
+            return usage->input_tokens + usage->output_tokens;
+    }
+    return -1;
 }
 
 /* An ordinary session then stores nothing extra, while a renamed provider or a gguf path still
@@ -426,7 +459,7 @@ struct agent_absorb_result agent_session_absorb(struct agent_session *session, s
         if (items[i].kind == ITEM_TOOL_CALL)
             result.had_tool_call = 1;
         /* Reasoning can be model-bound. Display identity also distinguishes custom endpoints
-         * that share one provider factory. */
+         * that share one constructor. */
         if (items[i].kind == ITEM_REASONING) {
             items[i].provider = session->provider_id ? xstrdup(session->provider_id) : NULL;
             items[i].model = session->model ? xstrdup(session->model) : NULL;

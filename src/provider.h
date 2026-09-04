@@ -29,7 +29,7 @@ enum item_origin {
     ITEM_ORIGIN_NONE = 0,
     ITEM_ORIGIN_COMPACT_SEED, /* synthetic USER_MESSAGE summarizing the history before it */
     ITEM_ORIGIN_CONTINUATION, /* synthetic USER_MESSAGE after an interrupted turn */
-    ITEM_ORIGIN_INTERRUPTED,  /* ASSISTANT_MESSAGE marked as interrupted */
+    ITEM_ORIGIN_INTERRUPTED,  /* ASSISTANT_MESSAGE or killed tool's TOOL_RESULT cut short */
     ITEM_ORIGIN_SKIPPED,      /* TOOL_RESULT for a call that did not run after an abort */
     ITEM_ORIGIN_REFUSED,      /* TOOL_RESULT for a call disabled by the frontend */
     ITEM_ORIGIN_SUMMARIZED,   /* TOOL_RESULT standing in for separately displayed output */
@@ -123,6 +123,9 @@ struct context {
     /* Image-input capability: 1 yes, 0 no, -1 unknown. Unknown is treated as yes because rejecting
      * an image is recoverable, while suppressing one silently loses content. */
     int image_input;
+    /* Stable id of the conversation, for provider-side affinity: sticky upstream routing and
+     * prompt-cache keys. NULL falls back to the adapter's per-process id. */
+    const char *session_id;
 };
 
 /* Usage reported for one response. Negative values mean unreported. `cached_tokens` and
@@ -269,6 +272,7 @@ struct model_info {
     char *id;          /* owned exact wire id; NULL in metadata-only merged views */
     char *description; /* owned one-line description; NULL when absent */
     long context;      /* served context window in tokens; 0 = unknown */
+    long max_context;  /* provider-declared ceiling for context overrides; 0 = unknown */
     long max_output;   /* maximum output tokens per response; 0 = unknown */
     enum provider_cap image_input;
     enum provider_cap tools;
@@ -378,20 +382,5 @@ const char *provider_stable_id(const struct provider *provider);
 /* Whether an item's recorded provenance names this provider/model pair. Sessions written by
  * earlier versions may carry a former provider id, so both sides are canonicalized. */
 int provider_provenance_matches(const struct item *item, const char *provider, const char *model);
-
-/* Static provider descriptor registered by src/providers/registry.c. */
-struct provider_factory {
-    const char *id; /* HAX_PROVIDER value, e.g. "codex", "llamacpp"; provider->id carries it */
-    /* Default display label when providers.<id>.display_name is not set; NULL → id. */
-    const char *display_name;
-    /* `id` allows one constructor to serve multiple config-defined provider identities; it
-     * outlives the provider, so constructors borrow it into provider->id. */
-    struct provider *(*new)(const char *id);
-    /* Prepare an immediate verdict or an owned GET request on the foreground thread. `reason` must
-     * be static. NULL means immediately available. */
-    void (*prepare_availability)(const char *id, struct provider_availability *availability);
-    /* Hidden from enumeration and automatic selection, but still resolvable explicitly by name. */
-    int internal;
-};
 
 #endif /* HAX_PROVIDER_H */

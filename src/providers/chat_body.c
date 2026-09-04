@@ -6,10 +6,12 @@
 #include <string.h>
 #include <strings.h>
 
+#include "buf.h"
 #include "catalog.h"
+#include "diag.h"
 #include "provider.h"
 #include "tool_schema.h"
-#include "util.h"
+#include "xalloc.h"
 #include "providers/wire.h"
 
 /* AUTO sends explicit cache markers only when writes replace ordinary input processing. */
@@ -342,8 +344,6 @@ json_t *chat_build_body(const struct context *context, const char *provider_id, 
         json_object_set_new(body, "tools", build_tools(context->tools, context->n_tools));
     if (opts->session_cache_key)
         json_object_set_new(body, "prompt_cache_key", json_string(opts->session_cache_key));
-    if (opts->emit_progress)
-        json_object_set_new(body, "return_progress", json_true());
     if (opts->request_cost)
         json_object_set_new(body, "usage", json_pack("{s:b}", "include", 1));
 

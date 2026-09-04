@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
+#include "buf.h"
+#include "system/fs.h"
 #include "system/path.h"
 
 static const char *skip_inline_whitespace(const char *cursor, const char *end)
@@ -117,7 +118,7 @@ void codex_load_settings(char **model, char **effort)
 
     char *path = path_expand_home("~/.codex/config.toml");
     size_t contents_len = 0;
-    char *contents = slurp_file(path, &contents_len);
+    char *contents = fs_read_file(path, &contents_len);
     free(path);
     if (!contents)
         return;

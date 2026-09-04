@@ -12,6 +12,65 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 - Interactive progress indicators show the latest reported context use and cumulative session spend,
   including an approximation marker when the cost is estimated.
 
+## [0.5.0] - 2026-09-04
+
+### Added
+
+- `hax --json` (implies `-p`) streams new conversation records as JSONL, followed by a `result`
+  record with the outcome, final text, cost, and session id. Plain `-p` output is unchanged, and
+  the session-file schema is now a supported read surface. See [docs/sessions.md](docs/sessions.md).
+- A resumed one-shot run no longer requires a prompt: `hax --resume=ID -p` (or `--json`)
+  continues from where the conversation stopped.
+- Codex `/login` now offers a local-browser OAuth flow for organizations that block device login;
+  the device flow remains available for ssh sessions. See [docs/providers.md](docs/providers.md#codex).
+- Provider blocks accept `metadata_api` to select the `/models` protocol independently of the
+  request protocol. All user-facing providers now also honor per-provider `sort_models` and
+  `catalog_id` settings. See [docs/providers.md](docs/providers.md#custom-providers).
+- `extra_headers` can override or remove provider defaults and interpolate the stable
+  `{session_id}` for gateways that route or cache by conversation. See
+  [docs/providers.md](docs/providers.md#request-passthrough).
+
+### Changed
+
+- Anthropic-protocol models on OpenCode Zen/Go and `anthropic-compatible` endpoints now use prompt
+  caching and choose adaptive or budget thinking from model metadata, as first-party Anthropic now
+  does. `thinking_mode` adds `auto` (the default) and `prefer-adaptive`.
+- One-shot runs stop cleanly on signals: SIGINT or SIGTERM interrupts the run with status 130,
+  while SIGUSR1 pauses at the next turn boundary. Completed work remains resumable, `--json`
+  emits a final result when possible, and a second signal still kills immediately. See
+  [docs/usage.md](docs/usage.md#cli-modes).
+- `max_turns` now bounds one-shot runs as well as interactive turns. Its default is `auto`:
+  unlimited interactively and 100 in one-shot mode.
+- Token counts and their `k`/`m` config suffixes now use decimal units; byte sizes remain
+  1024-based. For example, `context_limit: "272k"` means 272000 tokens.
+- `catalog.models` overrides now take precedence over live provider metadata and may be scoped by
+  runtime provider id. This allows codex context overrides without changing OpenAI metadata; the
+  model picker shows both the served window and its reported ceiling. See
+  [docs/providers.md](docs/providers.md#codex).
+- Skill discovery now searches `.agents/skills` from the current directory to the repository root,
+  then `~/.config/hax/skills` and `~/.agents/skills`; the nearest same-named skill wins. See
+  [docs/usage.md](docs/usage.md#project-instructions-and-context).
+- Provider routing and prompt-cache keys now remain stable for a conversation across restarts.
+  OpenRouter sends this id as `x-session-id`, and `/new` starts with a fresh id.
+- The first-party `openai`, `anthropic`, and `openrouter` providers pin their protocol along
+  with their endpoint: `providers.<id>.api` now warns instead of switching the wire. Use
+  `model_apis` for per-model protocols, or a custom provider.
+- The `providers.openrouter.title` and `providers.openrouter.referer` settings and their
+  `HAX_OPENROUTER_*` aliases are gone; override or remove the attribution headers through
+  `providers.openrouter.extra_headers`. See [docs/providers.md](docs/providers.md#openrouter).
+
+### Fixed
+
+- OpenCode Zen and Go now send the required `x-opencode-session` header; requests without it may
+  fail starting 2026-09-06.
+- Chat Completions streams now retry upstream failures signaled through `error` or `network_error`
+  finish reasons and report an error after retries, instead of returning an empty success.
+- Interactively resumed interrupted conversations now show the resume hint and accept empty Enter
+  to continue.
+- OpenCode Go usage-window limits now surface immediately instead of triggering futile retries.
+- The retry indicator shows the active attempt after backoff instead of remaining at
+  "retrying in 1s" while the request is in flight.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added

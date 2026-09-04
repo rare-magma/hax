@@ -5,7 +5,8 @@
 #include <string.h>
 #include <strings.h>
 
-#include "util.h"
+#include "buf.h"
+#include "xalloc.h"
 #include "render/markdown_scan.h"
 #include "render/markdown_table.h"
 #include "render/markdown_wrap.h"

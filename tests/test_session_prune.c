@@ -11,7 +11,8 @@
 #include "provider.h"
 #include "session.h"
 #include "session_prune.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/path.h"
 
 static struct item ONE_TURN[] = {
     {.kind = ITEM_TURN_BOUNDARY},

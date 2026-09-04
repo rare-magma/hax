@@ -84,8 +84,10 @@ structured values such as `providers`, `presets`, and `catalog.models` nested fo
 
 Scalar strings, numbers, and booleans are accepted. Booleans recognize `1/0`, `true/false`,
 `yes/no`, and `on/off`, case-insensitively. Durations accept seconds or `ms`, `s`, `m`, and `h`
-suffixes. Sizes accept plain bytes or `k` and `m` suffixes using 1024-base units. Invalid typed
-values use the setting's default; `/config` rejects invalid runtime values with an error.
+suffixes. Byte sizes accept plain bytes or `k` and `m` suffixes using 1024-base units; token
+counts (`context_limit`, catalog `limit` fields) use decimal `k` and `m`, so `"272k"` means
+272000 tokens. Invalid typed values use the setting's default; `/config` rejects invalid runtime
+values with an error.
 
 Keep secrets in environment variables where possible:
 
@@ -241,13 +243,13 @@ provider-dependent.
 | `keep_awake` | `HAX_KEEP_AWAKE` | on | Best-effort idle-sleep inhibition while a turn runs. |
 | `compact.auto` | `HAX_COMPACT_AUTO` | on | Automatically summarize history near the context limit. |
 | `compact.threshold` | `HAX_COMPACT_THRESHOLD` | `85` | Context percentage that triggers automatic compaction. |
-| `max_turns` | `HAX_MAX_TURNS` | `0` | Interactive model round-trips before a pause; `0` is unlimited. |
+| `max_turns` | `HAX_MAX_TURNS` | `auto` | Model round-trips per user turn: interactive pauses, one-shot aborts. `auto`: unlimited interactively, 100 in one-shot. |
 
 `theme=auto` respects `NO_COLOR`, terminal color support, and `COLORFGBG` when available. Terminals
 rarely report a light background reliably, so set `light` explicitly if auto detection is wrong.
 `theme=ansi` uses the terminal's own 16-color palette; identity tints apply only to dark/light themes.
 
-### Recording and model metadata
+### Recording
 
 | Config key | Environment | Default | Purpose |
 | --- | --- | --- | --- |
@@ -255,6 +257,11 @@ rarely report a light background reliably, so set `light` explicitly if auto det
 | `session_retention_days` | `HAX_SESSION_RETENTION_DAYS` | `30` | Remove inactive sessions after N days; `0` keeps them. |
 | `transcript` | `HAX_TRANSCRIPT` | — | Mirror the Ctrl-T transcript to a file. |
 | `trace` | `HAX_TRACE` | — | Write an HTTP/SSE diagnostic trace. |
+
+### Model metadata
+
+| Config key | Environment | Default | Purpose |
+| --- | --- | --- | --- |
 | `catalog.url` | `HAX_CATALOG_URL` | models.dev | Metadata catalog URL; empty disables fetching. |
 | `catalog.refresh` | `HAX_CATALOG_REFRESH` | `24h` | Refresh age; `0` disables fetching. |
 
@@ -280,10 +287,13 @@ Per-model overrides can be placed under `catalog.models`, with costs in USD per 
 }
 ```
 
-Configured fields override cached fields individually. Model API overrides for mixed gateways are
-covered under [Custom providers](./providers.md#custom-providers). A `~` on displayed spend means the
-result is estimated from token counts and this metadata; check provider billing for authoritative
-costs.
+Blocks are keyed by the runtime provider id (the `providers.<id>` name) or by the models.dev
+provider key when the two differ; the runtime-id block wins field by field. Configured fields
+override both the cached snapshot and metadata the provider reports live — see
+[Codex](./providers.md#codex) for a worked context-window override. Model API overrides for mixed
+gateways are covered under [Custom providers](./providers.md#custom-providers). A `~` on displayed
+spend means the result is estimated from token counts and this metadata; check provider billing
+for authoritative costs.
 
 ### Tools and transport
 
@@ -308,13 +318,14 @@ When `no_tasks` is on, reaching `bash.timeout` kills the command instead of deta
 ### Provider settings
 
 Every provider reads settings only from its own `providers.<id>` block; nothing bleeds between
-providers. For the first-party providers the endpoint and credential variable (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) are pinned — `base_url` in their blocks is ignored, so
-no setting can redirect a first-party key. Their other advanced fields (the same ones
+providers. For the first-party providers the endpoint, protocol, and credential variable
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) are pinned — `base_url` and `api`
+in their blocks warn and are ignored, so no setting can redirect a first-party key or change what
+it speaks. Their other advanced fields (the same ones
 [custom providers](./providers.md#custom-providers) accept) are honored but rarely needed; a
-different endpoint is a custom provider, not a tweak. Codex reads only `display_name` and the
-request-passthrough fields from its block; authentication comes from the ChatGPT login
-([`/login`](./providers.md#codex)).
+different endpoint is a custom provider, not a tweak. Codex is pinned the same way, and its
+credentials come from the ChatGPT login ([`/login`](./providers.md#codex)) rather than a key, so
+`api_key` and `api_key_env` in its block warn and are ignored.
 
 The shipped `openai-compatible` and `anthropic-compatible` providers are configured the same way —
 through their own `providers.<name>` blocks — and additionally bind environment variables to those
@@ -346,9 +357,9 @@ Keys in the `providers.anthropic-compatible` block:
 | `api_key` | `HAX_ANTHROPIC_API_KEY` | — | `x-api-key` token. Does not inherit `ANTHROPIC_API_KEY`. |
 | `display_name` | `HAX_ANTHROPIC_DISPLAY_NAME` | — | Banner and picker name. |
 | `max_tokens` | `HAX_ANTHROPIC_MAX_TOKENS` | model cap | Maximum output including thinking; clamped to known model limits. |
-| `thinking_mode` | `HAX_ANTHROPIC_THINKING_MODE` | `budget` | `adaptive`, `budget`, or `off`. When unset, selecting an effort switches to adaptive. |
+| `thinking_mode` | `HAX_ANTHROPIC_THINKING_MODE` | `auto` | `auto` follows model metadata; `prefer-adaptive` also assumes adaptive for models the catalog lacks; `adaptive`, `budget`, and `off` pin. Selecting an effort makes an unpinned mode adaptive. |
 | `thinking_budget` | `HAX_ANTHROPIC_THINKING_BUDGET` | max minus 1 | Budget-mode thinking tokens. |
-| `cache` | `HAX_ANTHROPIC_CACHE` | `auto` | Send prompt-cache breakpoints. |
+| `cache` | `HAX_ANTHROPIC_CACHE` | `auto` | Send prompt-cache breakpoints; `off` for endpoints that reject them. |
 | `cache_ttl` | `HAX_ANTHROPIC_CACHE_TTL` | `1h` | Cache TTL: `5m` or `1h`. |
 | `version` | `HAX_ANTHROPIC_VERSION` | `2023-06-01` | API version header. |
 
@@ -361,8 +372,6 @@ When model metadata has no output limit, `max_tokens` falls back internally to 3
 | `providers.llamacpp.base_url` | `HAX_LLAMACPP_BASE_URL` | — | Full llama-server URL; overrides the port. |
 | `providers.llamacpp.api_key` | `HAX_LLAMACPP_API_KEY` | — | Bearer token when llama-server uses `--api-key`. |
 | `providers.llamacpp.port` | `HAX_LLAMACPP_PORT` | `8080` | llama-server port when no base URL is set. |
-| `providers.openrouter.title` | `HAX_OPENROUTER_TITLE` | `hax` | OpenRouter attribution title; empty disables. |
-| `providers.openrouter.referer` | `HAX_OPENROUTER_REFERER` | `https://usehax.dev` | OpenRouter attribution URL; empty disables. |
 | `providers.mock.script` | `HAX_MOCK_SCRIPT` | — | Mock-provider script path. |
 
 Custom provider blocks are documented in [providers.md](./providers.md#custom-providers).

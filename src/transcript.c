@@ -6,13 +6,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "agent_usage.h"
 #include "config.h"
+#include "diag.h"
 #include "provider.h"
 #include "tool_schema.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/diff_color.h"
+#include "system/locale.h"
 #include "terminal/ansi.h"
 #include "terminal/theme.h"
+#include "text/fmt.h"
 #include "tools/output_cap.h"
 
 #define TRANSCRIPT_WIDTH_COLUMNS 60

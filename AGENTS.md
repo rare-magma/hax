@@ -45,7 +45,7 @@ Tests are plain C binaries using `tests/harness.h` (`EXPECT`, `EXPECT_STR_EQ`, `
 at process exit; raw `mkdtemp` in tests fails `make lint`.
 To add a test, append its source to `test_sources` in `tests/meson.build`, grouped to mirror
 the production `sources` list. Test names are path-derived: `tools/test_read.c` becomes
-`tools/read`, and `test_util.c` becomes `util`.
+`tools/read`, and `test_buf.c` becomes `buf`.
 
 End-to-end scenarios follow the same conventions in Python: standalone scripts under
 `tests/e2e/`, registered in `e2e_scenarios` in `tests/meson.build`. They run the built binary
@@ -94,6 +94,8 @@ Terminology:
 
 Core boundaries:
 
+- Keep shared primitives in small focused modules; there is no catch-all `util`. Extend the
+  module whose contract a new helper fits, or give it a focused module of its own.
 - The canonical conversation state is the flat, provider-independent `struct item` log owned by
   `struct agent_session`. Compaction appends a summary seed without deleting prior history; build
   model-visible windows with `agent_session_context()` rather than slicing the raw log.
@@ -125,10 +127,12 @@ Core boundaries:
 
 Extension workflows:
 
-- Reuse the OpenAI or Anthropic protocol families through presets when wire-compatible. Prefer a
-  config-defined provider for a static endpoint variant rather than a new C shim.
-- A compiled-in provider needs its source in `meson.build`, a factory declaration in
-  `providers/registry.h`, and a `BUILTINS[]` entry at the intended autoselect priority.
+- Every provider is one `struct provider_def` (`providers/registry.h`): shipped defs live in
+  `registry.c`'s `DEFS[]` table at their autoselect priority, and config.json `providers.*`
+  blocks overlay shipped defs or add data-only ones. Prefer pure data; add capability hooks
+  (`parse_model`, `probe_model`, `query_usage`, ...) only for genuinely provider-specific
+  behavior, and a `construct` override only when construction itself needs code. Hook sources go
+  in `meson.build`; a user-visible endpoint variant should be config, not C.
 - A compiled-in tool needs its source in `meson.build`, an exported `const struct tool` declaration
   in `tool.h`, and an entry in `agent_core.c`'s `TOOLS[]`.
 - Keep protocol translation and terminal-independent state machines pure and separately testable;
@@ -140,7 +144,7 @@ Extension workflows:
 - Linux-kernel-inspired userspace style: snake_case, no typedef'd structs, function braces on
   their own line, control-flow braces on the same line.
 - Every source file starts with `/* SPDX-License-Identifier: MIT */`.
-- Use plain `malloc`/`calloc`/`free`; `xmalloc`/`xstrdup`/`xasprintf` in `src/util.h` abort on
+- Use plain `malloc`/`calloc`/`free`; `xmalloc`/`xstrdup`/`xasprintf` in `src/xalloc.h` abort on
   OOM. No arenas.
 - Use kernel-style goto cleanup for multi-resource functions, with labels in reverse
   acquisition order.

@@ -9,6 +9,7 @@
 #include "catalog.h"
 #include "cli.h"
 #include "config.h"
+#include "diag.h"
 #include "oneshot.h"
 #include "provider.h"
 #include "select.h"
@@ -16,28 +17,25 @@
 #include "session_prune.h"
 #include "trace.h"
 #include "transcript.h"
-#include "util.h"
 #include "providers/registry.h"
+#include "system/locale.h"
 #include "terminal/theme.h"
 #include "transport/ca.h"
-
-/* Bounds unattended agent loops when an interrupt cannot reliably reach a pipeline. */
-#define ONESHOT_MAX_TURNS 100
 
 static struct provider *select_initial_provider(int one_shot, int *autoselected)
 {
     const char *name = config_str("provider");
     if (name && *name) {
         int restored = strcmp(config_source("provider"), "conversation") == 0;
-        const struct provider_factory *factory = provider_find(name);
+        const struct provider_def *def = provider_find(name);
         struct provider *provider = NULL;
 
-        if (!factory) {
+        if (!def) {
             fprintf(stderr, "hax: unknown provider '%s' (supported: ", name);
             provider_list_names(stderr);
             fprintf(stderr, ")\n");
         } else {
-            provider = factory->new(factory->id);
+            provider = provider_construct(def);
         }
         if (!provider && restored)
             hax_warn("'%s' is what this session was using — pass --provider/--model to "
@@ -221,9 +219,8 @@ int main(int argc, char **argv)
     if (!provider && options.one_shot)
         goto cleanup_provider;
 
-    result = options.one_shot
-                 ? oneshot_run(provider, prompt, &options.agent_options, ONESHOT_MAX_TURNS)
-                 : agent_run(&provider, &options.agent_options);
+    result = options.one_shot ? oneshot_run(provider, prompt, &options.agent_options)
+                              : agent_run(&provider, &options.agent_options);
 
 cleanup_provider:
     /* Providers must join background work before global libcurl teardown. */

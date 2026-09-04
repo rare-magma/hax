@@ -11,7 +11,8 @@
 #include <curl/curlver.h>
 #include <curl/typecheck-gcc.h>
 
-#include "util.h"
+#include "diag.h"
+#include "xalloc.h"
 
 /* The well-known locations curl's configure, Go, and rust-native-certs also probe, minus
  * historic-only paths. */

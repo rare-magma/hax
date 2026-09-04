@@ -7,8 +7,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "buf.h"
 #include "session.h"
-#include "util.h"
+#include "xalloc.h"
 #include "terminal/picker.h"
 #include "terminal/ui.h"
 #include "text/width.h"

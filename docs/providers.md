@@ -29,10 +29,11 @@ keys in environment variables rather than command arguments or `config.json`.
 | `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
 | `anthropic-compatible` | Anthropic Messages-compatible proxy/server | Base URL; usually choose a model. |
 
-When no provider is selected, hax tries the built-in providers first — Codex, llama.cpp, OpenAI,
-Anthropic, then OpenRouter — followed by the shipped compatible, OpenCode, and Ollama recipes and
-any user-defined providers. Auto-selection is convenient interactively; pass a provider explicitly
-in automation so a newly available backend cannot change a script's behavior.
+When no provider is selected, hax picks the first available one: the hosted providers (Codex,
+OpenAI, Anthropic, OpenRouter, OpenCode), then the local servers (llama.cpp, Ollama), then the
+generic compatible endpoints and any user-defined providers. Auto-selection is convenient
+interactively; pass a provider explicitly in automation so a newly available backend cannot change
+a script's behavior.
 
 If an explicitly selected provider cannot start, the REPL opens without one and directs you to
 `/provider`; one-shot mode exits with an error. A one-shot banner on stderr identifies the provider,
@@ -40,10 +41,12 @@ model, effort, and whether selection was automatic.
 
 ## Codex
 
-`codex` uses the ChatGPT Codex backend with a ChatGPT subscription login. Run `/login`, open the
-printed `auth.openai.com` page in a browser on any device, and approve the code. hax copies the code
-when a clipboard is available, stores the tokens in `~/.local/state/hax/auth.json`, and refreshes
-them automatically; the codex CLI is not needed. `/logout` removes the login.
+`codex` uses the ChatGPT Codex backend with a ChatGPT subscription login. Run `/login` and pick a
+flow: **browser** opens `auth.openai.com` in this machine's browser and finishes through a
+`localhost` redirect (some organizations only permit this flow), while **device code** shows a code
+to approve in a browser on any device, so it also works over ssh. Either way hax stores the tokens
+in `~/.local/state/hax/auth.json` and refreshes them automatically; the codex CLI is not needed.
+`/logout` removes the login.
 
 Alternatively, hax picks up credentials written by the official codex CLI:
 
@@ -63,6 +66,25 @@ none is configured, choose a model with `/model` or pass `--model`.
 response, so any `~$` amount is an API-equivalent estimate from model metadata, not a charge against
 the subscription.
 
+Codex serves some models a smaller default context window than they support — the `/model` picker
+shows the sanctioned ceiling as "272k context (up to 872k)". A
+[`catalog.models`](./configuration.md#model-metadata) override raises the window for
+one model; keying the block `codex` leaves the `openai` provider alone:
+
+```json
+{
+  "catalog": {
+    "models": {
+      "codex": {
+        "gpt-5.6-luna": {"limit": {"context": 872000}}
+      }
+    }
+  }
+}
+```
+
+Values above the ceiling are not clamped; the backend rejects requests larger than it actually serves.
+
 ## OpenAI
 
 ```sh
@@ -73,9 +95,10 @@ hax --provider=openai
 OpenAI has no fixed model default. Choose one with `/model`, set `model` in config, or pass
 `--model`. hax uses `https://api.openai.com/v1` with the Responses API — the best fit for current
 reasoning models and tool calls. Credentials come from `OPENAI_API_KEY`, and the endpoint is
-pinned: no setting can redirect the key elsewhere. A `providers.openai` config block accepts the
-same advanced fields as custom providers (minus `base_url`), though they are rarely needed; an
-OpenAI-shaped endpoint elsewhere belongs in a [custom provider](#custom-providers).
+pinned: no setting can redirect the key elsewhere or change the protocol. A `providers.openai`
+config block accepts the same advanced fields as custom providers (minus the pinned `base_url`
+and `api`), though they are rarely needed; an OpenAI-shaped endpoint elsewhere belongs in a
+[custom provider](#custom-providers).
 
 ## Anthropic
 
@@ -87,11 +110,11 @@ hax --provider=anthropic
 Choose a model with `/model`, config, or `--model`. hax uses `https://api.anthropic.com/v1` with
 credentials from `ANTHROPIC_API_KEY`; the endpoint is pinned.
 
-First-party Anthropic uses adaptive thinking, so `/effort` offers the effort levels exposed by hax.
-Prompt caching is enabled with a 1h TTL, and the output-token limit follows model metadata when
-available (falling back to 32000); a `providers.anthropic` config block can override advanced
-fields such as `max_tokens` when an older model needs it. A different endpoint — a proxy, say —
-belongs in a [custom provider](#custom-providers).
+Thinking follows model metadata: adaptive, with `/effort` levels, on current models and budget
+thinking on older ones. Prompt caching is enabled with a 1h TTL, and the output-token limit follows
+model metadata when available (falling back to 32000); a `providers.anthropic` config block can
+override advanced fields such as `max_tokens` when an older model needs it. A different endpoint —
+a proxy, say — belongs in a [custom provider](#custom-providers).
 
 ## OpenRouter
 
@@ -110,9 +133,20 @@ capabilities when available.
 The [transcript](debugging.md#transcript-log) reports the upstream endpoint OpenRouter routed each
 response to, which is how to confirm that `extra_body` routing preferences took effect.
 
-hax sends its project URL and title for OpenRouter app attribution by default. Set
-`providers.openrouter.referer` or `providers.openrouter.title` to an empty string to omit those
-headers.
+By default hax sends app attribution (`HTTP-Referer`, `X-Title`, `X-OpenRouter-Categories`) and
+the conversation id as `x-session-id`, which OpenRouter uses for sticky routing and to group the
+conversation in its activity view. Override or remove any of them through `extra_headers`
+([below](#request-passthrough)):
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "extra_headers": { "X-Title": "my-tool", "HTTP-Referer": "" }
+    }
+  }
+}
+```
 
 Before sending proprietary code, review the selected endpoint's retention/training policy and your
 OpenRouter privacy settings. Free and paid models have separate training controls, and a free model
@@ -136,6 +170,10 @@ yet described by the model catalog, see the `model_apis` override under
 
 On `opencode-go`, `/usage` shows the subscription's rolling, weekly, and monthly limits. Zen does
 not expose usage through its API, so check the OpenCode dashboard instead.
+
+Requests carry the conversation id as `x-opencode-session`, which the gateway requires for
+routing and prompt caching, and `x-opencode-client: hax`. Both can be overridden in
+`extra_headers` ([below](#request-passthrough)).
 
 ## llama.cpp
 
@@ -165,7 +203,7 @@ project context, tool results, and the desired output are combined.
 
 ## Ollama
 
-Ollama is a shipped custom-provider recipe for `http://127.0.0.1:11434/v1`:
+Ollama is a shipped custom provider preconfigured for `http://127.0.0.1:11434/v1`:
 
 ```sh
 ollama serve
@@ -180,7 +218,7 @@ Ollama's runtime context defaults can be small for coding-agent prompts. Set a l
 `context_limit` to the same value if you want hax's percentage display. A too-small context commonly
 appears as a response ending with `length`.
 
-Override the endpoint in `config.json`:
+Override the endpoint in `config.json` — `port` for another local port, or a full `base_url`:
 
 ```json
 {
@@ -194,11 +232,11 @@ Override the endpoint in `config.json`:
 
 ## Compatible built-ins
 
-`openai-compatible` and `anthropic-compatible` are shipped recipes for a generic endpoint you name
-at run time. They are ordinary [custom providers](#custom-providers) — configured through their own
-`providers.openai-compatible` / `providers.anthropic-compatible` blocks — whose keys additionally
-bind environment variables, so a one-off endpoint needs no config file. The variables affect only
-these two providers; the full key list is in
+`openai-compatible` and `anthropic-compatible` are shipped providers for a generic endpoint you
+name at run time. They are ordinary [custom providers](#custom-providers) — configured through
+their own `providers.openai-compatible` / `providers.anthropic-compatible` blocks — whose keys
+additionally bind environment variables, so a one-off endpoint needs no config file. The variables
+affect only these two providers; the full key list is in
 [configuration.md](./configuration.md#provider-settings).
 
 ### OpenAI-compatible
@@ -231,8 +269,9 @@ hax
 ```
 
 `HAX_ANTHROPIC_BASE_URL` is required. Use `HAX_ANTHROPIC_API_KEY` when authentication is needed; hax
-does not fall back to `ANTHROPIC_API_KEY`. Compatible endpoints default to budget thinking and leave
-explicit prompt-cache controls off for broader compatibility.
+does not fall back to `ANTHROPIC_API_KEY`. Compatible endpoints get the first-party thinking and
+prompt-cache defaults, except that a model the catalog does not list falls back to budget
+thinking. Override `thinking_mode` or `cache` when an endpoint needs it.
 
 For a static endpoint you use regularly, prefer a named custom provider instead of repeatedly
 exporting the generic base URL.
@@ -264,7 +303,7 @@ Common fields:
 
 | Field | Purpose |
 | --- | --- |
-| `base_url` | Required endpoint root, unless a shipped recipe supplies one. |
+| `base_url` | Required endpoint root, unless shipped defaults supply one. |
 | `display_name` | Human-readable banner name. |
 | `api` | `openai-completions` (default), `openai-responses`, `anthropic-messages`, or `catalog`. |
 | `model_apis` | Model-id globs mapped to `api` dialects; the first match sets that model's protocol. |
@@ -272,6 +311,7 @@ Common fields:
 | `api_key` | Literal key, or `$VAR` to read an environment variable. |
 | `sort_models` | Sort this provider's model picker newest-first (default); `off` keeps server order. |
 | `catalog_id` | Provider id in models.dev for cost/context metadata; empty disables lookup. |
+| `metadata_api` | `/models` dialect: `openai` (flat list) or `anthropic` (paginated); defaults to the request protocol's family. |
 | `extra_body` | Raw JSON members merged into every request body ([below](#request-passthrough)). |
 | `extra_headers` | HTTP headers sent on every request ([below](#request-passthrough)). |
 
@@ -280,10 +320,15 @@ Use `catalog_id` when a proxy name differs from the underlying provider. Do not 
 hosted provider merely because names look similar: prices and context limits may differ.
 
 `api: "catalog"` declares a mixed-protocol gateway the model catalog already describes: each model
-routes by the catalog's per-model API — how the shipped OpenCode recipes work — and models the
+routes by the catalog's per-model API — how the shipped OpenCode providers work — and models the
 catalog leaves unmapped use Chat Completions. `model_apis` rules also switch a provider into this
 mode and take precedence over catalog hints; either form makes every dialect's config fields apply,
 each to the models speaking it.
+
+`metadata_api` selects the `/models` shape and its auth scheme independently of the request
+protocol, since a proxy or gateway can pair either metadata side with either wire — an
+`anthropic-messages` endpoint behind an OpenAI-style `/v1/models`, say. It defaults to the family
+of the `api` protocol, so most providers never set it.
 
 For `openai-completions`, advanced fields are `reasoning_format`, `reasoning_roundtrip`,
 `send_cache_key`, `request_cost`, `cache`, and `cache_ttl`; reasoning replay is automatic per
@@ -298,7 +343,8 @@ warns about block members hax does not recognize or that its `api` dialect does 
 Every provider reads only its own block. The `HAX_OPENAI_*` and `HAX_ANTHROPIC_*` variables belong
 to the shipped `openai-compatible` / `anthropic-compatible` blocks and do not bleed into others;
 for a custom provider, only the variable named by `api_key_env` is read. Provider names cannot
-contain `.` and cannot override a compiled-in provider.
+contain `.`; a block named after a shipped provider configures that provider rather than
+replacing it.
 
 ### Request passthrough
 
@@ -316,7 +362,11 @@ streaming setup — are ignored with a warning naming the member.
 `extra_headers` is an object of header names and non-empty string values added to every request to
 the provider. A value of `$VAR` reads the environment variable `VAR`, keeping a credential out of
 the config file, like an inline `api_key: "$VAR"`; `$$` escapes a literal leading `$`. A header
-whose variable is unset is dropped with a warning.
+whose variable is unset is dropped with a warning. A header hax sends for the provider by default
+can be overridden by name (case-insensitive) or removed with an empty string value.
+
+A value may contain `{session_id}`, the conversation's stable id — the one `--resume` takes, so it
+survives restarts, while `/new` starts a fresh one — for gateways that route or cache by session.
 
 ```json
 {
@@ -332,7 +382,8 @@ whose variable is unset is dropped with a warning.
       "extra_body": { "service_tier": "priority" },
       "extra_headers": {
         "x-gateway-project": "hax",
-        "x-gateway-key": "$GATEWAY_EXTRA_KEY"
+        "x-gateway-key": "$GATEWAY_EXTRA_KEY",
+        "x-gateway-session": "{session_id}"
       }
     }
   }
@@ -340,11 +391,10 @@ whose variable is unset is dropped with a warning.
 ```
 
 Prefer a dedicated field when one exists — `api_key`/`api_key_env` for the credential, `version`
-for `anthropic-version`, the OpenRouter `title`/`referer` settings for its attribution headers —
-because hax cannot reason about a value injected behind its back: an `extra_body` that changes
-between runs can also defeat prompt caching. `HAX_TRACE` redacts API keys and `$VAR`-resolved
-values wherever they appear, but cannot recognize a credential written literally into a header
-value — one more reason to prefer `$VAR`.
+for `anthropic-version` — because hax cannot reason about a value injected behind its back: an
+`extra_body` that changes between runs can also defeat prompt caching. `HAX_TRACE` redacts API
+keys and `$VAR`-resolved values wherever they appear, but cannot recognize a credential written
+literally into a header value — one more reason to prefer `$VAR`.
 
 ## Mock provider
 

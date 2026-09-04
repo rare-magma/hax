@@ -2,8 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "buf.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
+#include "system/locale.h"
 #include "terminal/picker.h"
 #include "terminal/picker_core.h"
 

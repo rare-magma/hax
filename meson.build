@@ -1,5 +1,5 @@
 project('hax', 'c',
-    version: '0.4.0',
+    version: '0.5.0',
     license: 'MIT',
     default_options: [
         'c_std=c11',
@@ -27,7 +27,7 @@ add_project_arguments(
     '-D_DARWIN_C_SOURCE',
     # Project headers go through -iquote, not -I, so `#include <foo.h>`
     # always reaches a system header rather than shadowing it with one
-    # of ours (e.g. `src/util.h` would collide with macOS's `<util.h>`
+    # of ours (e.g. a `src/util.h` would collide with macOS's `<util.h>`
     # under -I). The `tests/` entry serves the same purpose for
     # `harness.h` and friends.
     '-iquote', meson.project_source_root() / 'src',
@@ -39,7 +39,8 @@ add_project_arguments(
 # clang-tidy does not report findings inside third-party headers (Homebrew
 # installs them outside the default system include path).
 libcurl = dependency('libcurl', include_type: 'system')
-jansson = dependency('jansson', include_type: 'system')
+# >=2.13 for json_object_update_recursive.
+jansson = dependency('jansson', version: '>=2.13', include_type: 'system')
 threads = dependency('threads')
 
 # FreeBSD resolves isfinite() to a libm symbol rather than a compiler builtin,
@@ -85,12 +86,14 @@ sources = files(
     'src/agent_tool.c',
     'src/agent_usage.c',
     'src/banner.c',
+    'src/buf.c',
     'src/busy.c',
     'src/catalog.c',
     'src/cli.c',
     'src/compact.c',
     'src/config.c',
     'src/cred_store.c',
+    'src/diag.c',
     'src/effort.c',
     'src/file_mention.c',
     'src/history.c',
@@ -109,26 +112,24 @@ sources = files(
     'src/trace.c',
     'src/transcript.c',
     'src/turn.c',
-    'src/util.c',
+    'src/xalloc.c',
 
-    'src/providers/anthropic.c',
     'src/providers/anthropic_body.c',
     'src/providers/anthropic_events.c',
+    'src/providers/anthropic_models.c',
     'src/providers/chat_body.c',
     'src/providers/chat_events.c',
     'src/providers/codex.c',
     'src/providers/codex_auth.c',
     'src/providers/codex_login.c',
     'src/providers/codex_settings.c',
-    'src/providers/config_provider.c',
+    'src/providers/provider_config.c',
     'src/providers/http_provider.c',
     'src/providers/llamacpp.c',
     'src/providers/mock.c',
-    'src/providers/openai.c',
-    'src/providers/openai_common.c',
+    'src/providers/openai_models.c',
     'src/providers/opencode.c',
     'src/providers/openrouter.c',
-    'src/providers/recipes.c',
     'src/providers/registry.c',
     'src/providers/responses_body.c',
     'src/providers/responses_events.c',
@@ -149,11 +150,16 @@ sources = files(
     'src/render/tool_render.c',
 
     'src/system/bg_job.c',
+    'src/system/browser.c',
+    'src/system/clock.c',
+    'src/system/fd.c',
     'src/system/fs.c',
     'src/system/git.c',
     'src/system/keepawake.c',
+    'src/system/locale.c',
     'src/system/os.c',
     'src/system/path.c',
+    'src/system/rand.c',
     'src/system/spawn.c',
     'src/system/tempfiles.c',
 
@@ -171,6 +177,11 @@ sources = files(
 
     'src/text/base64.c',
     'src/text/diff.c',
+    'src/text/fmt.c',
+    'src/text/placeholder.c',
+    'src/text/sha256.c',
+    'src/text/shell_quote.c',
+    'src/text/url.c',
     'src/text/utf8.c',
     'src/text/utf8_sanitize.c',
     'src/text/width.c',
@@ -194,6 +205,7 @@ sources = files(
     'src/transport/api_error.c',
     'src/transport/ca.c',
     'src/transport/http.c',
+    'src/transport/oauth.c',
     'src/transport/retry.c',
     'src/transport/sse.c',
 )

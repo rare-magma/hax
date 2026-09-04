@@ -7,14 +7,15 @@
 #include <time.h>
 
 #include "config.h"
-#include "util.h"
+#include "system/clock.h"
 #include "transport/http.h"
 
 #define MAX_DELAY_MS   30000
 #define SLEEP_SLICE_MS 100
 
 static const char *const TERMINAL_429_CODES[] = {
-    "usage_limit_reached", "usage_not_included", "insufficient_quota", "quota_exceeded", NULL,
+    "usage_limit_reached", "usage_not_included", "insufficient_quota",
+    "quota_exceeded",      "GoUsageLimitError",  NULL,
 };
 
 struct retry_policy retry_policy_default(void)

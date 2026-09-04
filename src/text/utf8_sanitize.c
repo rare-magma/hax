@@ -3,7 +3,8 @@
 
 #include <string.h>
 
-#include "util.h"
+#include "buf.h"
+#include "xalloc.h"
 #include "text/utf8.h"
 
 static const char REPLACEMENT[] = "\xEF\xBF\xBD";

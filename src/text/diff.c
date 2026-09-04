@@ -6,7 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "util.h"
+#include "buf.h"
+#include "xalloc.h"
 #include "text/utf8_sanitize.h"
 
 #define CONTEXT_LINES 3

@@ -4,9 +4,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "buf.h"
 #include "harness.h"
-#include "util.h"
+#include "xalloc.h"
 #include "render/spinner.h"
+#include "system/locale.h"
 #include "terminal/ansi.h"
 
 #define BRAILLE_PREFIX "\xE2\xA0"

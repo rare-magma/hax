@@ -10,7 +10,9 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 
-#include "util.h"
+#include "buf.h"
+#include "xalloc.h"
+#include "system/locale.h"
 #include "terminal/ansi.h"
 #include "terminal/input_core.h"
 #include "terminal/picker_core.h"

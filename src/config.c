@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <jansson.h>
 #include <libgen.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,10 +13,12 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "diag.h"
 #include "provider.h"
-#include "util.h"
+#include "xalloc.h"
 #include "system/fs.h"
 #include "system/path.h"
+#include "text/fmt.h"
 #include "text/utf8_sanitize.h"
 
 /* Canonical keys, env bindings, defaults, and /config metadata. Row order is
@@ -61,7 +64,7 @@ static const struct config_setting REGISTRY[] = {
      .choices = CONFIG_CHOICES_TRISTATE, .editable = 1},
     {.key = "context_limit", .env_var = "HAX_CONTEXT_LIMIT",
      .description = "Manual context-window size for the % display; overrides auto-detect",
-     .kind = CONFIG_KIND_SIZE, .editable = 1},
+     .kind = CONFIG_KIND_TOKENS, .editable = 1},
     {.key = "display_width", .env_var = "HAX_DISPLAY_WIDTH", .default_value = "auto",
      .description = "Content width: auto uses full width through 110 columns and 100 beyond that; "
                     "terminal always uses full width; a number sets an exact width",
@@ -90,10 +93,10 @@ static const struct config_setting REGISTRY[] = {
     {.key = "compact.threshold", .env_var = "HAX_COMPACT_THRESHOLD", .default_value = "85",
      .description = "Auto-compact when context usage reaches this percent of the window",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 100, .editable = 1},
-    {.key = "max_turns", .env_var = "HAX_MAX_TURNS",
-     .description = "Interactive: pause for confirmation after this many model round-trips per "
-                    "user turn",
-     .kind = CONFIG_KIND_INT, .editable = 1},
+    {.key = "max_turns", .env_var = "HAX_MAX_TURNS", .default_value = "auto",
+     .description = "Model round-trips per user turn: interactive then pauses for confirmation, "
+                    "one-shot aborts; auto is unlimited interactively and 100 in one-shot",
+     .choices = "auto", .example = "25", .kind = CONFIG_KIND_INT, .editable = 1},
 
     /* model catalog */
     {.key = "catalog.url", .env_var = "HAX_CATALOG_URL",
@@ -161,7 +164,7 @@ static const struct config_setting REGISTRY[] = {
      .description = "Silence on a streaming response before giving up; 0 disables",
      .kind = CONFIG_KIND_DURATION, .editable = 1},
 
-    /* openai-compatible (the shipped generic-endpoint recipe; the env vars are aliases into
+    /* openai-compatible (the shipped generic-endpoint provider; the env vars are aliases into
      * its providers.* block so a compatible endpoint stays one-shot configurable) */
     {.key = "providers.openai-compatible.base_url", .env_var = "HAX_OPENAI_BASE_URL",
      .description = "Base URL of the OpenAI-compatible endpoint"},
@@ -195,7 +198,7 @@ static const struct config_setting REGISTRY[] = {
                     "pauses)",
      .choices = "5m|1h"},
 
-    /* anthropic-compatible (same scheme for the generic Messages recipe) */
+    /* anthropic-compatible (same scheme for the generic Messages provider) */
     {.key = "providers.anthropic-compatible.base_url", .env_var = "HAX_ANTHROPIC_BASE_URL",
      .description = "Base URL of the Anthropic-compatible /v1 endpoint"},
     {.key = "providers.anthropic-compatible.api_key", .env_var = "HAX_ANTHROPIC_API_KEY",
@@ -211,15 +214,17 @@ static const struct config_setting REGISTRY[] = {
      .kind = CONFIG_KIND_INT, .min = 1},
     {.key = "providers.anthropic-compatible.thinking_mode",
      .env_var = "HAX_ANTHROPIC_THINKING_MODE",
-     .description = "Thinking mode: adaptive, budget, or off",
-     .choices = "adaptive|budget|off"},
+     .description = "Thinking mode: auto follows model metadata, prefer-adaptive also assumes "
+                    "adaptive for unlisted models; adaptive, budget, and off pin",
+     .choices = "auto|prefer-adaptive|adaptive|budget|off"},
     {.key = "providers.anthropic-compatible.thinking_budget",
      .env_var = "HAX_ANTHROPIC_THINKING_BUDGET",
      .description = "Budget-mode thinking tokens (default: max_tokens - 1)",
      .kind = CONFIG_KIND_INT, .min = 1},
     {.key = "providers.anthropic-compatible.cache", .env_var = "HAX_ANTHROPIC_CACHE",
      .choices = CONFIG_CHOICES_TRISTATE,
-     .description = "Send prompt cache_control breakpoints; auto uses the provider default"},
+     .description = "Send prompt cache_control breakpoints; off only for endpoints that reject "
+                    "them"},
     {.key = "providers.anthropic-compatible.cache_ttl", .env_var = "HAX_ANTHROPIC_CACHE_TTL",
      .description = "Cache breakpoint TTL: 5m or 1h (default 1h, suiting an interactive agent's "
                     "pauses)",
@@ -235,12 +240,6 @@ static const struct config_setting REGISTRY[] = {
     {.key = "providers.llamacpp.port", .env_var = "HAX_LLAMACPP_PORT", .default_value = "8080",
      .description = "Port for the local llama-server (when base_url is unset)",
      .kind = CONFIG_KIND_INT, .min = 1, .max = 65535},
-    {.key = "providers.openrouter.title", .env_var = "HAX_OPENROUTER_TITLE",
-     .default_value = "hax", .keep_empty = 1,
-     .description = "X-Title header for OpenRouter attribution (empty disables)"},
-    {.key = "providers.openrouter.referer", .env_var = "HAX_OPENROUTER_REFERER",
-     .default_value = "https://usehax.dev", .keep_empty = 1,
-     .description = "HTTP-Referer header for OpenRouter attribution (empty disables)"},
     {.key = "providers.mock.script", .env_var = "HAX_MOCK_SCRIPT",
      .description = "Path to a mock-provider script (mock provider only)"},
 };
@@ -382,7 +381,7 @@ static int load_tier_file(json_t **tier, char *path, const char *label)
     int unusable = 0;
     int truncated;
     errno = 0;
-    char *text = slurp_file_capped(path, CONFIG_MAX_BYTES, NULL, &truncated);
+    char *text = fs_read_file_capped(path, CONFIG_MAX_BYTES, NULL, &truncated);
     if (text) {
         if (truncated) {
             hax_warn("ignoring %s at %s: larger than the 1 MiB limit", label, path);
@@ -653,6 +652,87 @@ static int value_in_bounds(const struct config_setting *setting, long value)
     return 1;
 }
 
+static long parse_scaled(const char *str, long kilo)
+{
+    if (!str || !*str)
+        return 0;
+
+    char *end;
+    errno = 0;
+    long value = strtol(str, &end, 10);
+    if (end == str || value <= 0 || errno == ERANGE)
+        return 0;
+    while (*end == ' ' || *end == '\t')
+        end++;
+
+    long multiplier = 1;
+    switch (*end) {
+    case 'k':
+    case 'K':
+        multiplier = kilo;
+        end++;
+        break;
+    case 'm':
+    case 'M':
+        multiplier = kilo * kilo;
+        end++;
+        break;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0' || value > LONG_MAX / multiplier)
+        return 0;
+    return value * multiplier;
+}
+
+long parse_size(const char *str)
+{
+    return parse_scaled(str, 1024L);
+}
+
+long parse_token_count(const char *str)
+{
+    return parse_scaled(str, 1000L);
+}
+
+long parse_duration_ms(const char *str)
+{
+    if (!str || !*str)
+        return -1;
+
+    char *end;
+    errno = 0;
+    long value = strtol(str, &end, 10);
+    if (end == str || value < 0 || errno == ERANGE)
+        return -1;
+    while (*end == ' ' || *end == '\t')
+        end++;
+
+    long multiplier;
+    /* Match "ms" before "m". */
+    if ((end[0] == 'm' || end[0] == 'M') && (end[1] == 's' || end[1] == 'S')) {
+        multiplier = 1;
+        end += 2;
+    } else if (*end == '\0' || *end == 's' || *end == 'S') {
+        multiplier = 1000;
+        if (*end)
+            end++;
+    } else if (*end == 'm' || *end == 'M') {
+        multiplier = 60000;
+        end++;
+    } else if (*end == 'h' || *end == 'H') {
+        multiplier = 3600000;
+        end++;
+    } else {
+        return -1;
+    }
+    while (*end == ' ' || *end == '\t')
+        end++;
+    if (*end != '\0' || (multiplier > 1 && value > LONG_MAX / multiplier))
+        return -1;
+    return value * multiplier;
+}
+
 int config_int(const char *key)
 {
     const struct config_setting *setting = find_setting(key);
@@ -750,7 +830,7 @@ char *config_prompt_expand(const char *value, char **error)
 
     size_t len = 0;
     int truncated = 0;
-    char *content = slurp_file_capped(path, PROMPT_FILE_CAP, &len, &truncated);
+    char *content = fs_read_file_capped(path, PROMPT_FILE_CAP, &len, &truncated);
     if (!content) {
         if (error)
             *error = xasprintf("couldn't read prompt file %s", path);
@@ -784,6 +864,10 @@ static int kind_value_valid(const struct config_setting *setting, const char *va
     }
     case CONFIG_KIND_SIZE: {
         long parsed = parse_size(value);
+        return parsed > 0 && value_in_bounds(setting, parsed);
+    }
+    case CONFIG_KIND_TOKENS: {
+        long parsed = parse_token_count(value);
         return parsed > 0 && value_in_bounds(setting, parsed);
     }
     case CONFIG_KIND_DURATION: {
@@ -851,7 +935,10 @@ static void kind_value_hint(const struct config_setting *setting, char *buffer, 
             snprintf(buffer, size, "a whole number");
         break;
     case CONFIG_KIND_SIZE:
-        snprintf(buffer, size, "a size like 64k or 1M");
+        snprintf(buffer, size, "a byte size like 64k or 1M (k = 1024)");
+        break;
+    case CONFIG_KIND_TOKENS:
+        snprintf(buffer, size, "a token count like 200k or 1M (k = 1000)");
         break;
     case CONFIG_KIND_DURATION:
         snprintf(buffer, size, "a duration like 2s or 500ms");
@@ -911,6 +998,15 @@ long config_size(const char *key)
     if (value > 0 && value_in_bounds(setting, value))
         return value;
     return setting ? parse_size(setting->default_value) : 0;
+}
+
+long config_tokens(const char *key)
+{
+    const struct config_setting *setting = find_setting(key);
+    long value = parse_token_count(resolve(key, 1));
+    if (value > 0 && value_in_bounds(setting, value))
+        return value;
+    return setting ? parse_token_count(setting->default_value) : 0;
 }
 
 long config_duration_ms(const char *key)
