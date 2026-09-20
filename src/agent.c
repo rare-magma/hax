@@ -44,6 +44,7 @@
 #include "terminal/ui.h"
 #include "terminal/vt_resolve.h"
 #include "terminal/width.h"
+#include "text/fmt.h"
 #include "tools/bash_process.h"
 #include "tools/task_registry.h"
 
@@ -61,6 +62,7 @@ static const char *build_prompt(char *buffer, size_t size)
 /* Tables buffer invisibly until layout completes; delay the spinner to avoid flicker on fast
  * tables. */
 #define TABLE_SPINNER_DELAY_MS 1500
+#define CONTEXT_WARNING_PERCENT 85
 
 /* ANSI must bypass disp bookkeeping or it commits a pending newline before the next separator. */
 static void md_emit_to_disp(const char *bytes, size_t byte_count, int is_raw, void *user)
@@ -126,10 +128,11 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
 {
     struct agent_stats stats;
     agent_stats_collect(session, 0, 0, provider, &stats);
+    long context_limit = model_meta_context(provider, session->model);
     char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
-    int segment_count = agent_format_stats_segments(
-        segments, stats.context_tokens, model_meta_context(provider, session->model), elapsed_ms,
-        stats.total.spend, stats.total.spend_estimated);
+    int segment_count = agent_format_stats_segments(segments, stats.context_tokens, context_limit,
+                                                    elapsed_ms, stats.total.spend,
+                                                    stats.total.spend_estimated);
     if (segment_count == 0)
         return;
 
@@ -140,6 +143,9 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
     /* Segment bytes equal columns; the separator occupies three display columns. */
     int width = display_width();
     int column = 0;
+    int context_segment = elapsed_ms >= 0 ? 1 : 0;
+    int context_warning =
+        context_percentage(stats.context_tokens, context_limit) > CONTEXT_WARNING_PERCENT;
     for (int i = 0; i < segment_count; i++) {
         int segment_width = (int)strlen(segments[i]);
         if (column > 0) {
@@ -151,7 +157,14 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
                 column += 3;
             }
         }
+        int warn_context = context_warning && i == context_segment;
+        if (warn_context) {
+            disp_commit_newlines(disp);
+            disp_write_ansi(disp, theme_open(THEME_ERROR));
+        }
         disp_printf(disp, "%s", segments[i]);
+        if (warn_context)
+            disp_write_ansi(disp, theme_close(THEME_ERROR));
         column += segment_width;
     }
     disp_write_ansi(disp, ANSI_RESET);

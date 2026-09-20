@@ -103,6 +103,15 @@ static void test_format_tokens_ranges(void)
     EXPECT_STR_EQ(buf, "12M");
 }
 
+static void test_context_percentage(void)
+{
+    EXPECT(context_percentage(85, 100) == 85);
+    EXPECT(context_percentage(86, 100) == 86);
+    EXPECT(context_percentage(-1, 100) == -1);
+    EXPECT(context_percentage(86, 0) == -1);
+    EXPECT(context_percentage(1000, 1) == 999);
+}
+
 static void test_format_context_with_and_without_limit(void)
 {
     char buf[64];
@@ -136,6 +145,7 @@ int main(void)
     test_format_duration_extreme();
     test_format_cost_precision();
     test_format_tokens_ranges();
+    test_context_percentage();
     test_format_context_with_and_without_limit();
     test_format_usage_extremes();
 

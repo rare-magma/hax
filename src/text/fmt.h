@@ -21,6 +21,9 @@ void format_cost(char *out, size_t out_size, double usd);
 /* Use decimal k/M suffixes for token counts — tokens are specified and billed in decimal
  * multiples, unlike bytes. Negative values produce "?". */
 void format_tokens(char *out, size_t out_size, long tokens);
+/* Return the displayed context percentage, clamped to 999, or -1 when either measurement is
+ * unavailable. */
+int context_percentage(long context_tokens, long context_limit);
 /* Include the usage percentage when context_limit is positive; negative context_tokens means
  * unknown usage ("? / 256k", no percentage). */
 void format_context(char *out, size_t out_size, long context_tokens, long context_limit);

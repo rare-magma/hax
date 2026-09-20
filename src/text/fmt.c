@@ -93,18 +93,28 @@ void format_tokens(char *out, size_t out_size, long tokens)
         snprintf(out, out_size, "%ldM", tokens / million + (tokens % million >= million / 2));
 }
 
+int context_percentage(long context_tokens, long context_limit)
+{
+    if (context_tokens < 0 || context_limit <= 0)
+        return -1;
+
+    double ratio = (double)context_tokens * 100.0 / (double)context_limit;
+    if (ratio > 999.0)
+        return 999;
+    return (int)ratio;
+}
+
 void format_context(char *out, size_t out_size, long context_tokens, long context_limit)
 {
     char used[32];
     format_tokens(used, sizeof(used), context_tokens);
-    if (context_limit > 0 && context_tokens >= 0) {
+    int percentage = context_percentage(context_tokens, context_limit);
+    if (percentage >= 0) {
         char limit[32];
         /* Usage above the window is real (stale model metadata), so report it rather than
          * capping at 100; the ceiling only keeps the field three digits wide. */
-        double ratio = (double)context_tokens * 100.0 / (double)context_limit;
-        long percentage = ratio > 999.0 ? 999 : (long)ratio;
         format_tokens(limit, sizeof(limit), context_limit);
-        snprintf(out, out_size, "%s / %s (%ld%%)", used, limit, percentage);
+        snprintf(out, out_size, "%s / %s (%d%%)", used, limit, percentage);
     } else if (context_limit > 0) {
         char limit[32];
         format_tokens(limit, sizeof(limit), context_limit);
