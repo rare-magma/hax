@@ -82,7 +82,7 @@ when working on untrusted input or when the blast radius matters.
 
 What hax provides instead is control and restraint, not enforcement: the default system prompt
 forbids destructive git operations and tells the model to ask before irreversible actions, Esc
-pauses a running turn for steering, and `max_turns` bounds unattended runs.
+pauses a running turn for steering, and `max_turns` can bound unattended runs.
 
 ### No custom slash commands
 

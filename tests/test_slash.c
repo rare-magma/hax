@@ -6,7 +6,6 @@
 
 #include "agent.h"
 #include "agent_core.h"
-#include "agent_usage.h"
 #include "harness.h"
 #include "provider.h"
 #include "slash.h"
@@ -31,11 +30,6 @@ void agent_new_conversation(struct agent_state *state)
 {
     agent_session_reset(state->session);
 }
-double agent_session_spend(const struct session_stats *stats, int *estimated)
-{
-    return agent_spend_total(&stats->spend, estimated);
-}
-
 /* Scriptable picker state distinguishes cancellation from an unavailable picker. */
 static int stub_picker_shown = 0;
 static const char *stub_picker_path = NULL;
@@ -332,33 +326,53 @@ static void test_help_wraps_to_narrow_width(void)
 
 /* ---------- /session ---------- */
 
+/* One user turn: prompt, reply, and a footer whose costs are given directly, as a provider
+ * that reports charges would leave them. */
+static void add_priced_user_turn(struct agent_session *session, const char *provider,
+                                 const char *model, long input, long output, long cached,
+                                 long cache_write, double cost, int estimated)
+{
+    agent_session_add_user(session, "prompt");
+    agent_session_append(session,
+                         (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("reply")});
+    struct turn_usage *usage = xcalloc(1, sizeof(*usage));
+    usage->usage =
+        (struct stream_usage){input, output, cached, cache_write, -1, estimated ? -1 : cost};
+    usage->elapsed_ms = 1000;
+    usage->uncached_input_tokens =
+        input - (cached > 0 ? cached : 0) - (cache_write > 0 ? cache_write : 0);
+    usage->cost_input = -1;
+    usage->cost_cache_read = -1;
+    usage->cost_cache_write = -1;
+    usage->cost_output = -1;
+    usage->cost_total = cost;
+    usage->cost_estimated = estimated;
+    agent_session_append(session, (struct item){.kind = ITEM_TURN_USAGE,
+                                                .usage = usage,
+                                                .provider = xstrdup(provider),
+                                                .model = xstrdup(model)});
+}
+
+static void add_tool_call(struct agent_session *session, const char *tool_name)
+{
+    agent_session_append(session, (struct item){.kind = ITEM_TOOL_CALL,
+                                                .call_id = xstrdup("c"),
+                                                .tool_name = xstrdup(tool_name),
+                                                .tool_arguments_json = xstrdup("{}")});
+}
+
 static void test_session_prints_totals(void)
 {
     struct render_ctx r = {0};
     r.disp.committed_newlines = 1;
-    struct agent_state state = {.render = &r};
-    state.stats.user_turns = 3;
-    state.stats.requests = 7;
-    state.stats.tool_calls = 6;
-    state.stats.tools[0].name = "bash";
-    state.stats.tools[0].count = 4;
-    state.stats.tools[1].name = "read";
-    state.stats.tools[1].count = 2;
-    state.stats.worked_ms = 68000;
-    state.stats.input_tokens = 5530;
-    state.stats.output_tokens = 412;
-    state.stats.cached_tokens = 2048;
-    state.stats.cache_write_tokens = 1024;
-    state.stats.uncached_input_tokens = 5530 - 2048 - 1024;
-    /* Without a provider, only the reported total charge can be displayed. */
-    struct stream_usage reported = {.input_tokens = 5530,
-                                    .output_tokens = 412,
-                                    .cached_tokens = 2048,
-                                    .cache_write_tokens = 1024,
-                                    .cache_write_1h_tokens = -1,
-                                    .cost = 0.042};
-    agent_spend_account(&state.stats.spend, &reported, NULL, NULL);
-    state.stats.latest_context_tokens = 4000;
+    struct agent_session s = {0};
+    add_priced_user_turn(&s, "prov", "m", 2000, 200, 1024, 512, 0.02, 0);
+    add_tool_call(&s, "bash");
+    add_tool_call(&s, "bash");
+    add_tool_call(&s, "read");
+    add_priced_user_turn(&s, "prov", "m", 3530, 212, 1024, 512, 0.022, 0);
+    agent_session_add_worked(&s, 68000);
+    struct agent_state state = {.session = &s, .render = &r};
     struct dispatch_call c = {.line = "/session", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
@@ -366,17 +380,18 @@ static void test_session_prints_totals(void)
     EXPECT(strstr(out, "user turns") != NULL);
     EXPECT(strstr(out, "requests") != NULL);
     EXPECT(strstr(out, "tool calls") != NULL);
-    EXPECT(strstr(out, "6 · bash 4 · read 2") != NULL);
+    EXPECT(strstr(out, "3 · bash 2 · read 1") != NULL);
     EXPECT(strstr(out, "time worked") != NULL);
     EXPECT(strstr(out, "1m 08s") != NULL);
     EXPECT(strstr(out, "context") != NULL);
-    EXPECT(strstr(out, "4k") != NULL);
-    EXPECT(strstr(out, "tokens total") != NULL);
+    EXPECT(strstr(out, "3.7k") != NULL);
+    EXPECT(strstr(out, "tokens") != NULL);
     EXPECT(strstr(out, "in 2.5k · cache 2k · write 1k · out 412") != NULL);
     EXPECT(strstr(out, "$0.042") != NULL);
     EXPECT(strstr(out, "~$") == NULL);
+    EXPECT(strstr(out, "undone") == NULL);
     free(out);
-    agent_spend_free(&state.stats.spend);
+    agent_session_free(&s);
 }
 
 static void test_session_hides_unreported_rows(void)
@@ -421,36 +436,50 @@ static void test_session_marks_estimated_spend(void)
 {
     struct render_ctx r = {0};
     r.disp.committed_newlines = 1;
-    struct agent_state state = {.render = &r};
-    struct stream_usage paid = {-1, -1, -1, -1, -1, 0.030};
-    agent_spend_account(&state.stats.spend, &paid, NULL, NULL);
-    struct stream_usage u = {.input_tokens = 1000,
-                             .output_tokens = 50,
-                             .cached_tokens = -1,
-                             .cache_write_tokens = -1,
-                             .cache_write_1h_tokens = -1,
-                             .cost = -1};
-    agent_spend_account(&state.stats.spend, &u, NULL, NULL);
+    struct agent_session s = {0};
+    add_priced_user_turn(&s, "prov", "m", 1000, 50, -1, -1, 0.010, 0);
+    add_priced_user_turn(&s, "prov", "m", 1000, 50, -1, -1, 0.020, 1);
+    struct agent_state state = {.session = &s, .render = &r};
     struct dispatch_call c = {.line = "/session", .state = &state};
     char *out = capture_stdout(do_dispatch, &c);
     EXPECT(c.result == SLASH_HANDLED);
     EXPECT(strstr(out, "~$0.030") != NULL);
     free(out);
-    agent_spend_free(&state.stats.spend);
+    agent_session_free(&s);
+}
+
+/* A model switch mid-conversation gets one token row per model, and undone user turns stay in
+ * the totals, flagged on the count the screen no longer shows. */
+static void test_session_splits_models_and_counts_undone(void)
+{
+    struct render_ctx r = {0};
+    r.disp.committed_newlines = 1;
+    struct agent_session s = {0};
+    add_priced_user_turn(&s, "prov", "small", 1000, 100, -1, -1, 0.01, 0);
+    add_priced_user_turn(&s, "prov", "large", 2000, 200, -1, -1, 0.10, 0);
+    add_priced_user_turn(&s, "prov", "large", 3000, 300, -1, -1, 0.20, 0);
+    agent_session_retire(&s, items_user_turn_cut(s.items, s.n_items, 2));
+    struct agent_state state = {.session = &s, .render = &r};
+    struct dispatch_call c = {.line = "/session", .state = &state};
+    char *out = capture_stdout(do_dispatch, &c);
+    EXPECT(c.result == SLASH_HANDLED);
+    EXPECT(strstr(out, "prov · small") != NULL);
+    EXPECT(strstr(out, "$0.010 · in 1k · out 100") != NULL);
+    EXPECT(strstr(out, "prov · large") != NULL);
+    EXPECT(strstr(out, "$0.300 · in 5k · out 500") != NULL);
+    EXPECT(strstr(out, "2 · 1 undone") != NULL);
+    EXPECT(strstr(out, "$0.31") != NULL);
+    free(out);
+    agent_session_free(&s);
 }
 
 static void test_session_wraps_to_narrow_width(void)
 {
     struct render_ctx r = {0};
     r.disp.committed_newlines = 1;
-    struct agent_state state = {.render = &r};
-    state.stats.user_turns = 3;
-    state.stats.requests = 7;
-    state.stats.input_tokens = 5530;
-    state.stats.output_tokens = 412;
-    state.stats.cached_tokens = 2048;
-    state.stats.cache_write_tokens = 1024;
-    state.stats.uncached_input_tokens = 5530 - 2048 - 1024;
+    struct agent_session s = {0};
+    add_priced_user_turn(&s, "prov", "m", 5530, 412, 2048, 1024, -1, 1);
+    struct agent_state state = {.session = &s, .render = &r};
     struct dispatch_call c = {.line = "/session", .state = &state};
 
     setenv("HAX_DISPLAY_WIDTH", "30", 1);
@@ -462,9 +491,10 @@ static void test_session_wraps_to_narrow_width(void)
     free(raw);
     expect_rows_fit(out, 30);
     /* The token row wraps at segment spaces rather than truncating. */
-    EXPECT(strstr(out, "tokens total") != NULL);
+    EXPECT(strstr(out, "tokens") != NULL);
     EXPECT(strstr(out, "out 412") != NULL);
     free(out);
+    agent_session_free(&s);
 }
 
 /* ---------- /new and its alias /clear ---------- */
@@ -736,6 +766,7 @@ int main(void)
     test_session_hides_unreported_rows();
     test_session_shows_window_before_first_request();
     test_session_marks_estimated_spend();
+    test_session_splits_models_and_counts_undone();
     test_session_wraps_to_narrow_width();
     test_new_clears_session_without_switching_preset();
     test_clear_alias_runs_new();

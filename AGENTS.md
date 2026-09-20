@@ -104,8 +104,8 @@ Core boundaries:
   cooperative jobs, and join every worker before destroying state it may access or tearing down
   global libcurl state.
 - `model_meta` is the resolved view for live provider/model capability decisions; `catalog` is its
-  lower-level metadata and pricing source. Cost estimation belongs in `agent_usage`, not provider
-  adapters.
+  lower-level metadata and pricing source. Cost estimation belongs in `agent_usage` (one response)
+  and `agent_stats` (a whole conversation, derived from its items), not provider adapters.
 - `transcript` renders the model-facing conversation, `history` reconstructs the user-facing
   display, and `session` is structured resumable persistence. Do not substitute one representation
   for another.

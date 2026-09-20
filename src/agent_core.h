@@ -56,6 +56,14 @@ struct agent_session {
     struct item *items;
     size_t n_items;
     size_t cap_items;
+    /* Items /undo removed from the conversation, in their original order. They are no longer
+     * context, but the requests they record were still served and paid for. */
+    struct item *retired;
+    size_t n_retired;
+    size_t cap_retired;
+    /* Wall time of completed user turns, as the session file records it. */
+    long worked_ms;
+    long last_user_turn_ms; /* -1 until a user turn completes */
 };
 
 /* Initialize a session. A missing model is valid so the interactive frontend can prompt for one. */
@@ -73,8 +81,21 @@ int agent_session_resync_effort(struct agent_session *session, struct provider *
 
 void agent_session_free(struct agent_session *session);
 
-/* Clear conversation items while preserving session settings and item-vector capacity. */
+/* Clear conversation items, retired items, and timing while preserving session settings and
+ * item-vector capacity. */
 void agent_session_reset(struct agent_session *session);
+
+/* Move items[from, n_items) to the retired list and forget the last user turn's duration. */
+void agent_session_retire(struct agent_session *session, size_t from);
+
+struct session_loaded;
+
+/* Replace the conversation, retired items, and timing with a loaded session file's, taking
+ * ownership of its arrays and leaving its metadata for the caller. */
+void agent_session_adopt(struct agent_session *session, struct session_loaded *loaded);
+
+/* Record a completed user turn's wall time. */
+void agent_session_add_worked(struct agent_session *session, long elapsed_ms);
 
 /* Return a borrowed provider context, valid until the next session mutation. Items before the
  * newest compaction seed are excluded: compaction summarizes a prefix rather than discarding it,
@@ -94,10 +115,11 @@ void agent_session_add_continuation(struct agent_session *session);
 void agent_session_add_boundary(struct agent_session *session);
 
 /* Append an owned usage footer for one provider round-trip. `response` is the identity the
- * provider reported for it, or NULL when the footer stands in for no single stream. */
+ * provider reported for it, or NULL when the footer stands in for no single stream. `origin` is
+ * ITEM_ORIGIN_COMPACTION for a summarization request, whose window is not the conversation's. */
 void agent_session_add_turn_usage(struct agent_session *session, const struct provider *provider,
                                   const struct stream_usage *usage, long elapsed_ms,
-                                  const struct stream_response *response);
+                                  const struct stream_response *response, enum item_origin origin);
 
 /* Add an interrupt marker unless the latest content is an already-marked tool result. */
 void agent_session_mark_interrupt(struct agent_session *session);

@@ -83,6 +83,7 @@ sources = files(
     'src/agent_dispatch.c',
     'src/agent_env.c',
     'src/agent_loop.c',
+    'src/agent_stats.c',
     'src/agent_tool.c',
     'src/agent_usage.c',
     'src/banner.c',

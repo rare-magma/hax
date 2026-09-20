@@ -66,7 +66,8 @@ hax --json "fix the failing test" | jq 'select(.kind == "tool_call" or .type == 
 
 A picker needs a terminal, so use `--resume=ID` rather than bare `--resume` with `-p`. `--raw` and
 `--bare` still record the conversation; combine either with `--no-session` for a disposable run.
-`max_turns` bounds a one-shot run's provider round-trips (default 100).
+A one-shot run is unlimited by default; set `max_turns` to abort after that many provider
+round-trips.
 
 A one-shot run responds to signals the way the REPL responds to Esc: SIGUSR1 pauses cleanly at
 the next turn boundary (outcome `paused`), and SIGINT (Ctrl-C) or SIGTERM interrupts at once,
@@ -83,7 +84,7 @@ Type `/help` for the authoritative live list.
 | `/new [preset]` | Start a fresh conversation, optionally with a preset. `/clear` is an alias. |
 | `/resume` | Pick a past session for this directory. |
 | `/fork [n]` | Create a new session before an earlier prompt; `/fork 0` clones the current tip. |
-| `/undo [n]` | Permanently truncate this session before an earlier prompt. |
+| `/undo [n]` | Roll the conversation back to before an earlier prompt. |
 | `/provider` | Choose a provider, model, and effort. |
 | `/model` | Choose a model and effort for the current provider. |
 | `/effort` | Choose reasoning effort when supported. |
@@ -93,13 +94,13 @@ Type `/help` for the authoritative live list.
 | `/compact [focus]` | Summarize older context, optionally emphasizing a focus. |
 | `/copy` | Copy the latest assistant response. |
 | `/tasks [kill <id>... \| kill all]` | List or stop background tasks. |
-| `/session` | Show session selection and local usage totals. |
+| `/session` | Show the session's selection and usage totals. |
 | `/usage` | Query provider account/subscription usage when supported. |
 | `/login [provider]` | Log in to a provider account with a hax-managed token (ChatGPT/codex). |
 | `/logout [provider]` | Revoke and remove a hax-managed login. |
 
-Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` rewrites both
-memory and the session file and has no redo.
+Prefer `/fork` when trying an alternative: the original session stays intact. `/undo` has no redo;
+the removed user turns still count toward the session's usage totals.
 
 ## Keyboard shortcuts
 
@@ -241,9 +242,10 @@ faster and cheaper in one conversation.
 ## Context, compaction, and usage
 
 After a turn, hax shows elapsed time, current context use, and spend when the provider or model
-metadata can supply it. A `~` marks estimated cost. `/session` shows totals for the current process;
-`/usage` asks the provider for account-level usage when supported. One-shot runs put equivalent stats
-on stderr.
+metadata can supply it. A `~` marks estimated cost. `/session` shows the conversation's totals,
+including undone user turns and retried requests, with a token row per model when models were
+switched; a resumed session shows the same totals. `/usage` asks the provider for account-level
+usage when supported. One-shot runs put equivalent stats on stderr.
 
 Automatic compaction summarizes old history near 85% of a known context window. Use `/compact`
 earlier when the conversation has accumulated obsolete exploration, optionally naming what the

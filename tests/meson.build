@@ -15,6 +15,7 @@ test_sources = [
     'test_agent_dispatch.c',
     'test_agent_env.c',
     'test_agent_loop.c',
+    'test_agent_stats.c',
     'test_agent_tool.c',
     'test_agent_usage.c',
     'test_banner.c',

@@ -557,7 +557,7 @@ static void test_turn_usage_provenance_omits_redundant_labels(void)
     struct provider provider = {.name = "llamacpp"};
     struct stream_usage usage = reported_usage();
     struct stream_response response = {.model = "/models/qwen3.gguf", .route = NULL};
-    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response);
+    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response, ITEM_ORIGIN_NONE);
 
     const struct turn_provenance *provenance = &session.items[0].usage->provenance;
     EXPECT(!provenance->provider_label);
@@ -577,7 +577,7 @@ static void test_turn_usage_provenance_records_distinct_identity(void)
     struct stream_usage usage = reported_usage();
     struct stream_response response = {
         .id = "gen-abc", .model = "deepseek/deepseek-v4", .route = "Wafer"};
-    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response);
+    agent_session_add_turn_usage(&session, &provider, &usage, 1000, &response, ITEM_ORIGIN_NONE);
 
     const struct turn_provenance *provenance = &session.items[0].usage->provenance;
     EXPECT_STR_EQ(provenance->provider_label, "llama.cpp");
@@ -595,7 +595,7 @@ static void test_turn_usage_provenance_without_response(void)
     struct agent_session session = {.provider_id = "openrouter", .model = xstrdup("m1")};
     struct provider provider = {.name = "openrouter"};
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, &provider, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, &provider, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
 
     const struct turn_provenance *provenance = &session.items[0].usage->provenance;
     EXPECT(!provenance->served_model);
@@ -614,7 +614,7 @@ static void test_mark_interrupt_skips_interrupted_result(void)
                                        .output = xstrdup("partial output\n" INTERRUPT_MARKER),
                                        .origin = ITEM_ORIGIN_INTERRUPTED});
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
 
     size_t before = session.n_items;
     agent_session_mark_interrupt(&session);
@@ -661,7 +661,7 @@ static void test_mark_interrupt_marks_clean_result(void)
                                                  .call_id = xstrdup("c2"),
                                                  .output = xstrdup("clean result")});
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     agent_session_mark_interrupt(&session);
 
     EXPECT(session.n_items == 3);
@@ -693,14 +693,14 @@ static void test_resume_tail_classification(void)
     agent_session_append(&session,
                          (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("done")});
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_CLEAN);
 
     agent_session_append(&session, (struct item){.kind = ITEM_TOOL_RESULT,
                                                  .call_id = xstrdup("c1"),
                                                  .output = xstrdup(INTERRUPT_MARKER),
                                                  .origin = ITEM_ORIGIN_SKIPPED});
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_resume_tail(&session) == AGENT_RESUME_TAIL_MARKED);
 
     /* A continuation that itself went unanswered re-sends rather than stacking another one. */
@@ -730,16 +730,16 @@ static void test_last_context_tokens(void)
 
     agent_session_add_user(&session, "hello");
     struct stream_usage usage = reported_usage();
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == 110);
 
     usage.input_tokens = 600;
     usage.output_tokens = 40;
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == 640);
 
     struct stream_usage unreported = {-1, -1, -1, -1, -1, -1};
-    agent_session_add_turn_usage(&session, NULL, &unreported, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &unreported, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == 640);
 
     /* Production order: the accepted summarization footer follows the seed and reports the
@@ -749,7 +749,7 @@ static void test_last_context_tokens(void)
                                                  .origin = ITEM_ORIGIN_COMPACT_SEED});
     usage.input_tokens = 900;
     usage.output_tokens = 100;
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
     EXPECT(agent_session_last_context_tokens(&session) == -1);
 
     /* A continued turn's footer after the seed is the window snapshot again. */
@@ -758,7 +758,14 @@ static void test_last_context_tokens(void)
                          (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = xstrdup("onward")});
     usage.input_tokens = 120;
     usage.output_tokens = 30;
-    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL);
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_NONE);
+    EXPECT(agent_session_last_context_tokens(&session) == 150);
+
+    /* A compaction that produced no seed still left its footers; they describe the summary
+     * request, so the agent turn before them stays the snapshot. */
+    usage.input_tokens = 5000;
+    usage.output_tokens = 10;
+    agent_session_add_turn_usage(&session, NULL, &usage, 1000, NULL, ITEM_ORIGIN_COMPACTION);
     EXPECT(agent_session_last_context_tokens(&session) == 150);
 
     agent_session_free(&session);

@@ -11,7 +11,7 @@
 #include "agent_core.h"
 #include "agent_dispatch.h"
 #include "agent_loop.h"
-#include "agent_usage.h"
+#include "agent_stats.h"
 #include "banner.h"
 #include "catalog.h"
 #include "compact.h"
@@ -25,7 +25,6 @@
 #include "select.h"
 #include "session.h"
 #include "slash.h"
-#include "tool.h"
 #include "transcript.h"
 #include "xalloc.h"
 #include "render/disp.h"
@@ -57,27 +56,6 @@ static const char *build_prompt(char *buffer, size_t size)
     else
         snprintf(buffer, size, ANSI_BOLD ">" ANSI_BOLD_OFF " ");
     return buffer;
-}
-
-/* Per-tool slots need static registry names; compaction can free item-owned names.
- * Unknown names count only toward the total. */
-static void stats_count_tool_call(struct session_stats *stats, const char *tool_name)
-{
-    stats->tool_calls++;
-    const struct tool *tool = tool_name ? agent_find_tool(tool_name) : NULL;
-    if (!tool)
-        return;
-    for (size_t i = 0; i < SESSION_STATS_MAX_TOOLS; i++) {
-        if (stats->tools[i].name == tool->def.name) {
-            stats->tools[i].count++;
-            return;
-        }
-        if (!stats->tools[i].name) {
-            stats->tools[i].name = tool->def.name;
-            stats->tools[i].count = 1;
-            return;
-        }
-    }
 }
 
 /* Tables buffer invisibly until layout completes; delay the spinner to avoid flicker on fast
@@ -120,20 +98,15 @@ void agent_display_refresh(struct agent_state *state)
         render->md = md_new(md_emit_to_disp, &render->disp, md_cols());
 }
 
-double agent_session_spend(const struct session_stats *stats, int *estimated)
+static void update_spinner_live_info(struct render_ctx *render, const struct provider *provider,
+                                     const struct agent_session *session)
 {
-    return agent_spend_total(&stats->spend, estimated);
-}
-
-static void update_spinner_live_info(struct render_ctx *render, const struct session_stats *stats)
-{
-    int estimated = 0;
-    double spend = agent_session_spend(stats, &estimated);
-    long context_tokens = stats->latest_context_tokens > 0 ? stats->latest_context_tokens : -1;
+    struct agent_stats stats;
+    agent_stats_collect(session, 0, 0, provider, &stats);
     char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
-    int segment_count =
-        agent_format_stats_segments(segments, context_tokens, stats->context_limit, -1, spend,
-                                    estimated);
+    int segment_count = agent_format_stats_segments(
+        segments, stats.context_tokens, model_meta_context(provider, session->model), -1,
+        stats.total.spend, stats.total.spend_estimated);
 
     struct buf info;
     buf_init(&info);
@@ -146,35 +119,17 @@ static void update_spinner_live_info(struct render_ctx *render, const struct ses
     buf_free(&info);
 }
 
-/* Ordinary turns and compaction account request counts and window snapshots differently. */
-static void stats_account_usage(struct session_stats *stats, const struct stream_usage *usage,
-                                const struct provider *provider, const char *model)
-{
-    if (usage->input_tokens >= 0)
-        stats->input_tokens += usage->input_tokens;
-    if (usage->output_tokens >= 0)
-        stats->output_tokens += usage->output_tokens;
-    if (usage->cached_tokens > 0)
-        stats->cached_tokens += usage->cached_tokens;
-    if (usage->cache_write_tokens > 0)
-        stats->cache_write_tokens += usage->cache_write_tokens;
-    if (usage->input_tokens > 0)
-        stats->uncached_input_tokens += agent_usage_uncached_input(usage, provider, model);
-    agent_spend_account(&stats->spend, usage, provider, model);
-}
-
-/* Show one summary per user turn, using the latest context snapshot and cumulative session
- * spend. Wrap only at segment boundaries to keep values intact. */
+/* Show one summary per user turn: its duration, the latest context snapshot, and cumulative
+ * session spend. Wrap only at segment boundaries to keep values intact. */
 static void display_stats_line(struct render_ctx *render, const struct provider *provider,
-                               const char *model, long context_tokens, long elapsed_ms,
-                               const struct session_stats *stats)
+                               const struct agent_session *session, long elapsed_ms)
 {
-    int estimated = 0;
-    double spend = agent_session_spend(stats, &estimated);
+    struct agent_stats stats;
+    agent_stats_collect(session, 0, 0, provider, &stats);
     char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
-    int segment_count =
-        agent_format_stats_segments(segments, context_tokens, model_meta_context(provider, model),
-                                    elapsed_ms, spend, estimated);
+    int segment_count = agent_format_stats_segments(
+        segments, stats.context_tokens, model_meta_context(provider, session->model), elapsed_ms,
+        stats.total.spend, stats.total.spend_estimated);
     if (segment_count == 0)
         return;
 
@@ -630,8 +585,6 @@ void agent_new_conversation(struct agent_state *state)
     /* Old-turn temporary files are unreachable after history is reset. Must follow the task
      * shutdown: unlinking a live task's advertised spool would leave its log path dangling. */
     tempfiles_cleanup();
-    agent_spend_free(&state->stats.spend);
-    memset(&state->stats, 0, sizeof(state->stats));
     /* finalize_tasks' stop note consumed the dispatcher's separator; restore the blank line
      * before the banner (a no-op when nothing was printed). */
     disp_block_separator(&state->render->disp);
@@ -682,7 +635,7 @@ static int is_replay_anchor(const struct item *item)
  * Anchor on its user item rather than a turn boundary because one prompt may span several model
  * turns. Non-interactive runs render no replay. */
 static void replay_user_turn(struct render_ctx *render, const struct agent_session *session,
-                             const char *heading)
+                             const char *heading, const struct provider *provider)
 {
     if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
         return;
@@ -720,6 +673,9 @@ static void replay_user_turn(struct render_ctx *render, const struct agent_sessi
         disp_putc(&render->disp, '\n');
     disp_commit_newlines(&render->disp);
     disp_flush(&render->disp);
+    /* A resumed screen ends as the original did, with the last user turn's stats. */
+    if (provider)
+        display_stats_line(render, provider, session, session->last_user_turn_ms);
 }
 
 void agent_resume_session(struct agent_state *state, const char *path)
@@ -727,13 +683,9 @@ void agent_resume_session(struct agent_state *state, const char *path)
     /* Claim activity before reading; another process may run the daily sweep concurrently. */
     (void)session_touch(path);
     struct agent_session *session = state->session;
-    struct item *loaded_items = NULL;
-    size_t loaded_item_count = 0;
-    struct session_meta metadata;
-    if (session_load(path, &loaded_items, &loaded_item_count, &metadata) != 0 ||
-        loaded_item_count == 0) {
-        free(loaded_items);
-        session_meta_free(&metadata);
+    struct session_loaded loaded;
+    if (session_load_all(path, &loaded) != 0 || loaded.n_items == 0) {
+        session_loaded_free(&loaded);
         ui_error("could not read session");
         /* Replace the picker's stale newline count with the error line's committed newline. */
         disp_sync_external_line(&state->render->disp);
@@ -749,41 +701,29 @@ void agent_resume_session(struct agent_state *state, const char *path)
 
     /* Restore settings before swapping history so announcements are framed against the
      * conversation being left and new logs use the restored system prompt and model. */
-    select_restore_session(state, metadata.provider, metadata.model, metadata.effort,
-                           metadata.preset);
+    select_restore_session(state, loaded.meta.provider, loaded.meta.model, loaded.meta.effort,
+                           loaded.meta.preset);
 
     /* Keep tracked temporary files when replacing history; resumable branches may share paths. */
-    for (size_t i = 0; i < session->n_items; i++)
-        item_free(&session->items[i]);
-    free(session->items);
-    session->items = loaded_items;
-    session->n_items = loaded_item_count;
-    session->cap_items = loaded_item_count;
+    agent_session_adopt(session, &loaded);
 
     /* Re-evaluate recording after provider restoration; the starting provider may have disabled
      * it. Recorded metadata lets session_log_set_meta stage a failed restore as a switch. */
     if (agent_recording_enabled(state->provider))
         state->session_log =
-            session_log_resume(path, metadata.provider, metadata.model, metadata.effort,
-                               metadata.preset, loaded_item_count);
+            session_log_resume(path, loaded.meta.provider, loaded.meta.model, loaded.meta.effort,
+                               loaded.meta.preset, session->n_items);
     /* Stage a failed selection restore without changing the file until a turn is appended. */
     session_log_set_meta(state->session_log, agent_provider_log_name(state->provider),
                          session->model, session->model_label, session->effort,
                          config_str("preset"));
-    session_meta_free(&metadata);
+    session_loaded_free(&loaded);
     transcript_log_reset(state->transcript, session->system_prompt, session->tools,
                          session->n_tools);
     transcript_log_append(state->transcript, session->items, session->n_items);
 
     derive_resume_state(state);
-    replay_user_turn(state->render, session, "resumed");
-}
-
-/* This predicate must match session.c's JSONL rule: /undo combines its file offset with this
- * in-memory turn count. */
-static int is_typed_prompt(const struct item *item)
-{
-    return item->kind == ITEM_USER_MESSAGE && item->origin == ITEM_ORIGIN_NONE;
+    replay_user_turn(state->render, session, "resumed", state->provider);
 }
 
 static int turn_item_index(const struct agent_session *session, size_t turn_index,
@@ -791,7 +731,7 @@ static int turn_item_index(const struct agent_session *session, size_t turn_inde
 {
     size_t turns_seen = 0;
     for (size_t i = 0; i < session->n_items; i++) {
-        if (is_typed_prompt(&session->items[i])) {
+        if (item_is_typed_prompt(&session->items[i])) {
             if (turns_seen == turn_index) {
                 *item_index_out = i;
                 return 0;
@@ -806,7 +746,7 @@ size_t agent_user_turn_count(const struct agent_session *session)
 {
     size_t count = 0;
     for (size_t i = 0; i < session->n_items; i++)
-        if (is_typed_prompt(&session->items[i]))
+        if (item_is_typed_prompt(&session->items[i]))
             count++;
     return count;
 }
@@ -819,10 +759,11 @@ const char *agent_user_turn_text(const struct agent_session *session, size_t tur
     return session->items[item_index].text;
 }
 
-/* Shared tail of /undo and /fork. `cut_index` is the item truncation point;
- * `turn_index` identifies the first discarded prompt to stage for recall. */
+/* Shared tail of /undo and /fork. `cut_index` is the item truncation point; `turn_index`
+ * identifies the first discarded prompt to stage for recall. An undo retires the cut items, whose
+ * requests this session still paid for; a fork leaves them to the source session. */
 static void reshape_after_cut(struct agent_state *state, size_t cut_index, size_t turn_index,
-                              const char *heading)
+                              const char *heading, int retire)
 {
     struct agent_session *session = state->session;
     clear_resume_state(state);
@@ -832,23 +773,19 @@ static void reshape_after_cut(struct agent_state *state, size_t cut_index, size_
     free(state->pending_recall);
     state->pending_recall = recall_text ? xstrdup(recall_text) : NULL;
 
-    size_t old_item_count = session->n_items;
-    for (size_t i = cut_index; i < session->n_items; i++)
-        item_free(&session->items[i]);
-    session->n_items = cut_index;
-
-    /* A destructive cut invalidates the server-reported window snapshot; retained usage items do
-     * not reliably describe the new tail. Cumulative totals remain valid. */
-    if (cut_index < old_item_count) {
-        state->stats.latest_context_tokens = 0;
-        state->stats.context_limit = 0;
+    if (retire) {
+        agent_session_retire(session, cut_index);
+    } else {
+        for (size_t i = cut_index; i < session->n_items; i++)
+            item_free(&session->items[i]);
+        session->n_items = cut_index;
     }
 
     transcript_log_reset(state->transcript, session->system_prompt, session->tools,
                          session->n_tools);
     transcript_log_append(state->transcript, session->items, session->n_items);
     /* Cleanup is all-or-nothing, and the retained prefix may still reference tracked files. */
-    replay_user_turn(state->render, session, heading);
+    replay_user_turn(state->render, session, heading, NULL);
 }
 
 void agent_undo(struct agent_state *state, size_t turn_index)
@@ -862,19 +799,18 @@ void agent_undo(struct agent_state *state, size_t turn_index)
 
     size_t removed_turns = agent_user_turn_count(session) - turn_index;
 
-    /* Truncate the on-disk record first; on I/O failure bail with history
-     * intact. The file keeps the old branch and its high-water mark, so
-     * truncating memory too would later append onto that stale branch. */
-    if (session_log_truncate(state->session_log, turn_index, cut_index) != 0) {
-        ui_error("could not truncate the session file; conversation left unchanged");
+    /* Record the cut before applying it; on I/O failure bail with history intact, or the file
+     * would keep the old branch as live and the next append would extend it. */
+    if (session_log_undo(state->session_log, turn_index, cut_index) != 0) {
+        ui_error("could not record the undo in the session file; conversation left unchanged");
         disp_sync_external_line(&state->render->disp);
         return;
     }
 
     char heading[64];
-    snprintf(heading, sizeof(heading), "undid %zu turn%s", removed_turns,
+    snprintf(heading, sizeof(heading), "undid %zu user turn%s", removed_turns,
              removed_turns == 1 ? "" : "s");
-    reshape_after_cut(state, cut_index, turn_index, heading);
+    reshape_after_cut(state, cut_index, turn_index, heading, 1);
 }
 
 void agent_fork(struct agent_state *state, size_t turn_index)
@@ -898,20 +834,24 @@ void agent_fork(struct agent_state *state, size_t turn_index)
     }
 
     const char *source_path = session_log_path(state->session_log);
+    /* The branch continues from the live selection, whatever the copied prefix ran under. */
+    struct session_header selection = {
+        .provider = agent_provider_log_name(state->provider),
+        .model = session->model,
+        .model_label = session->model_label,
+        .effort = session->effort,
+        .preset = config_str("preset"),
+    };
     char *new_path = NULL;
-    if (session_fork_file(source_path, turn_index, &new_path) != 0) {
+    if (session_fork_file(source_path, session->items, cut_index, &selection, &new_path) != 0) {
         ui_error("could not create fork");
         disp_sync_external_line(&state->render->disp);
         return;
     }
-    /* Open the new logger before closing the old one so failure is atomic. It starts with copied
-     * metadata, then stages the live selection for the branch's first new turn. */
-    struct session_meta fork_metadata;
-    session_read_meta(new_path, &fork_metadata);
+    /* Open the new logger before closing the old one so failure is atomic. */
     struct session_log *new_session_log =
-        session_log_resume(new_path, fork_metadata.provider, fork_metadata.model,
-                           fork_metadata.effort, fork_metadata.preset, cut_index);
-    session_meta_free(&fork_metadata);
+        session_log_resume(new_path, selection.provider, selection.model, selection.effort,
+                           selection.preset, cut_index);
     if (!new_session_log) {
         unlink(new_path);
         free(new_path);
@@ -925,38 +865,22 @@ void agent_fork(struct agent_state *state, size_t turn_index)
     session_log_close(state->session_log);
     state->session_log = new_session_log;
 
-    reshape_after_cut(state, cut_index, turn_index, "forked");
-}
-
-struct compact_event_ctx {
-    struct session_stats *stats;
-    struct render_ctx *render;
-    const struct provider *provider;
-    const char *model;
-};
-
-static int compact_on_event(const struct stream_event *event, void *user)
-{
-    struct compact_event_ctx *ctx = user;
-    const struct stream_usage *usage = NULL;
-    if (event->kind == EV_DONE)
-        usage = &event->u.done.usage;
-    else if (event->kind == EV_ERROR)
-        usage = event->u.error.usage;
-    else if (event->kind == EV_RETRY)
-        usage = event->u.retry.usage;
-    if (!usage)
-        return 0;
-
-    stats_account_usage(ctx->stats, usage, ctx->provider, ctx->model);
-    return 0;
+    /* The branch reads the copied prefix but the source paid for it, and what the source undid
+     * or spent is not the branch's record. */
+    for (size_t i = 0; i < cut_index; i++)
+        session->items[i].inherited = 1;
+    for (size_t i = 0; i < session->n_retired; i++)
+        item_free(&session->retired[i]);
+    session->n_retired = 0;
+    session->worked_ms = 0;
+    session->last_user_turn_ms = -1;
+    reshape_after_cut(state, cut_index, turn_index, "forked", 0);
 }
 
 /* Compaction has no pause seam, so either interrupt cancels the retriable transaction. */
 static int compact_tick(void *user)
 {
-    struct compact_event_ctx *ctx = user;
-    return agent_stream_tick(ctx->render) || interrupt_pause_requested();
+    return agent_stream_tick(user) || interrupt_pause_requested();
 }
 
 static int compact_cancelled(void *user)
@@ -1007,12 +931,6 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
 
     render_stream_begin(render);
     spinner_set_label(render->spinner, "compacting", "compacting...");
-    struct compact_event_ctx event_ctx = {
-        .stats = &state->stats,
-        .render = render,
-        .provider = provider,
-        .model = session->model,
-    };
     struct compact_params params = {
         .session = session,
         .provider = provider,
@@ -1021,8 +939,7 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
         .instructions = instructions,
         .hooks =
             {
-                .user = &event_ctx,
-                .on_event = compact_on_event,
+                .user = render,
                 .tick = compact_tick,
                 .is_cancelled = compact_cancelled,
             },
@@ -1032,22 +949,14 @@ int agent_compact(struct agent_state *state, const char *instructions, int autom
     interrupt_arm();
     struct compact_result result;
     compact_run(&params, &result);
-    /* Cancelled attempts emit no terminal event, so the transaction reports
-     * the authoritative request count separately from usage observation. */
-    state->stats.requests += result.attempts;
     interrupt_disarm();
     render_set_mode(render, RENDER_IDLE);
 
     int compacted = result.outcome == COMPACT_COMPLETE;
-    /* The snapshot describes the window the seed replaced; retaining it could immediately
-     * recompact the fresh seed. */
-    if (compacted) {
-        state->stats.latest_context_tokens = 0;
-        state->stats.context_limit = 0;
-        /* Any successful compaction — manual included — settles a deferred
-         * end-of-turn pass: the oversized history it referred to is gone. */
+    /* Any successful compaction — manual included — settles a deferred end-of-turn pass: the
+     * oversized history it referred to is gone. */
+    if (compacted)
         state->compaction_deferred = 0;
-    }
     /* Manual compaction moves the model past the resumable tail; retract the empty-send offer. */
     if (compacted && !automatic)
         clear_resume_state(state);
@@ -1089,13 +998,7 @@ struct repl_loop_ctx {
 static int repl_loop_on_event(const struct stream_event *event, void *user)
 {
     struct repl_loop_ctx *ctx = user;
-    struct agent_state *state = ctx->state;
-    if (event->kind == EV_RETRY && event->u.retry.usage) {
-        stats_account_usage(&state->stats, event->u.retry.usage, state->provider,
-                            state->session->model);
-        update_spinner_live_info(state->render, &state->stats);
-    }
-    return render_on_event(event, state->render);
+    return render_on_event(event, ctx->state->render);
 }
 
 static int repl_loop_tick(void *user)
@@ -1108,27 +1011,7 @@ static void repl_loop_turn_begin(void *user)
 {
     struct repl_loop_ctx *ctx = user;
     render_stream_begin(ctx->state->render);
-}
-
-static void repl_loop_turn_end(const struct agent_loop_turn *loop_turn, void *user)
-{
-    struct repl_loop_ctx *ctx = user;
-    struct agent_state *state = ctx->state;
-    struct agent_session *session = state->session;
-    const struct provider *provider = state->provider;
-    struct session_stats *stats = &state->stats;
-    const struct stream_usage *usage = &loop_turn->usage;
-
-    stats->requests++;
-    if (usage->input_tokens >= 0 && usage->output_tokens >= 0) {
-        stats->latest_context_tokens = usage->input_tokens + usage->output_tokens;
-        stats->context_limit = model_meta_context(provider, session->model);
-    }
-    /* Retried attempts are separate spend records: merging could void an exact terminal
-     * charge over their unpriced tokens. Retry usage was accounted at EV_RETRY; the context
-     * snapshot above stays terminal-only. */
-    stats_account_usage(stats, usage, provider, session->model);
-    update_spinner_live_info(ctx->state->render, stats);
+    update_spinner_live_info(ctx->state->render, ctx->state->provider, ctx->state->session);
 }
 
 static int repl_loop_checkpoint(void *user)
@@ -1140,12 +1023,6 @@ static int repl_loop_checkpoint(void *user)
     if (interrupt_pause_requested())
         return AGENT_LOOP_SIG_PAUSE;
     return AGENT_LOOP_SIG_NONE;
-}
-
-static void repl_loop_tool_seen(const struct item *call, void *user)
-{
-    struct repl_loop_ctx *ctx = user;
-    stats_count_tool_call(&ctx->state->stats, call->tool_name);
 }
 
 static struct item repl_loop_tool_call(const struct item *call, enum agent_loop_tool_action action,
@@ -1252,19 +1129,17 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     struct session_meta resume_metadata;
     memset(&resume_metadata, 0, sizeof(resume_metadata));
     if (options->resume_path) {
-        struct item *loaded_items = NULL;
-        size_t loaded_item_count = 0;
-        if (session_load(options->resume_path, &loaded_items, &loaded_item_count,
-                         &resume_metadata) != 0) {
+        struct session_loaded loaded;
+        if (session_load_all(options->resume_path, &loaded) != 0) {
             hax_err("could not resume session '%s'", options->resume_path);
-            session_meta_free(&resume_metadata);
             agent_session_free(&session);
             return 1;
         }
-        session.items = loaded_items;
-        session.n_items = loaded_item_count;
-        session.cap_items = loaded_item_count;
-        resumed_item_count = loaded_item_count;
+        agent_session_adopt(&session, &loaded);
+        resume_metadata = loaded.meta;
+        memset(&loaded.meta, 0, sizeof(loaded.meta));
+        session_loaded_free(&loaded);
+        resumed_item_count = session.n_items;
     }
 
     putchar('\n');
@@ -1277,7 +1152,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
     render.md = markdown_enabled() ? md_new(md_emit_to_disp, &render.disp, md_cols()) : NULL;
     /* Replay needs the live renderer initialized first. */
     if (resumed_item_count > 0)
-        replay_user_turn(&render, &session, "resumed");
+        replay_user_turn(&render, &session, "resumed", current_provider);
     struct input *input = input_new();
     /* Prompt recall remains readable when recording is disabled. */
     input_history_open_default(input, recording_enabled);
@@ -1390,7 +1265,6 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         }
 
         int continued = 0;
-        int typed_prompt = *line != 0;
         /* Boundaries precede fresh prompts. An empty send asks the recorded tail how to
          * continue, so a compaction seed just appended above supersedes an older marker. */
         if (*line) {
@@ -1450,21 +1324,19 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         /* Reset promoted spinner state before timing the new user turn. */
         spinner_set_label(render.spinner, "working", "working...");
-        update_spinner_live_info(&render, &state.stats);
+        update_spinner_live_info(&render, current_provider, &session);
         spinner_set_timer(render.spinner, user_turn_start_ms);
 
         /* Clear stale editor interrupts before arming first-Esc pause and second-Esc abort. */
         interrupt_clear_requests();
         interrupt_arm();
-        /* A positive max_turns pauses at a clean seam; auto (and 0) means unlimited here. */
-        int max_turns = config_int("max_turns");
         struct repl_loop_ctx loop_ctx = {.state = &state};
         struct agent_loop_params loop_params = {
             .session = &session,
             .provider = current_provider,
             .tlog = state.transcript,
             .slog = state.session_log,
-            .max_turns = max_turns > 0 ? max_turns : -1,
+            .max_turns = config_int("max_turns"),
             .continued = continued,
             .hooks =
                 {
@@ -1472,9 +1344,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                     .observe = repl_loop_on_event,
                     .tick = repl_loop_tick,
                     .turn_begin = repl_loop_turn_begin,
-                    .turn_end = repl_loop_turn_end,
                     .checkpoint = repl_loop_checkpoint,
-                    .tool_seen = repl_loop_tool_seen,
                     .tool_call = repl_loop_tool_call,
                     .compact = repl_loop_compact,
                     .task_note = repl_loop_task_note,
@@ -1511,13 +1381,11 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         /* Time worked counts errored/interrupted turns too — the wall time
          * was spent either way, and /session's total should reflect it. */
         long user_turn_ms = monotonic_ms() - user_turn_start_ms;
-        state.stats.worked_ms += user_turn_ms;
-        if (typed_prompt)
-            state.stats.user_turns++;
+        agent_session_add_worked(&session, user_turn_ms);
+        session_log_user_turn(state.session_log, user_turn_ms);
 
         if (!user_turn_errored)
-            display_stats_line(&render, current_provider, session.model, user_turn_context_tokens,
-                               user_turn_ms, &state.stats);
+            display_stats_line(&render, current_provider, &session, user_turn_ms);
 
         /* Auto-compact only completed, Esc-free turns. Clean pauses defer compaction until the
          * next send; errors and aborts retain partial history for retry or explicit
@@ -1551,7 +1419,6 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
         md_free(render.md);
     transcript_log_close(transcript);
     session_log_close(state.session_log);
-    agent_spend_free(&state.stats.spend);
     free(state.pending_preseed);
     agent_session_free(&session);
     return 0;

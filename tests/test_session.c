@@ -76,7 +76,8 @@ static int items_equal(const struct item *a, const struct item *b)
            a->output_hidden_tail == b->output_hidden_tail &&
            nullable_strings_equal(a->reasoning_json, b->reasoning_json) &&
            nullable_strings_equal(a->reasoning_text, b->reasoning_text) && a->origin == b->origin &&
-           turn_usage_equal(a->usage, b->usage) && item_images_equal(a, b);
+           a->inherited == b->inherited && turn_usage_equal(a->usage, b->usage) &&
+           item_images_equal(a, b);
 }
 
 static void expect_item_codec_round_trip(const struct item *source)
@@ -144,8 +145,8 @@ static struct item_image IMAGES[] = {
 };
 
 static struct item CONVERSATION[] = {
-    {.kind = ITEM_TURN_BOUNDARY},
-    {.kind = ITEM_USER_MESSAGE, .text = (char *)"hello world"},
+    {.kind = ITEM_TURN_BOUNDARY, .inherited = 1},
+    {.kind = ITEM_USER_MESSAGE, .text = (char *)"hello world", .inherited = 1},
     {.kind = ITEM_REASONING,
      .reasoning_text = (char *)"thinking...",
      .reasoning_json = (char *)"{\"id\":\"r1\"}"},
@@ -614,37 +615,53 @@ static struct item UNDO_CONVERSATION[] = {
     {.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a2"},
 };
 
-static void test_truncate_and_reappend(void)
+static size_t count_text(const struct item *items, size_t n, const char *text)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < n; i++)
+        if (items[i].text && strcmp(items[i].text, text) == 0)
+            count++;
+    return count;
+}
+
+/* An undo is a record, not a rewrite: the file keeps growing, a reload lands on the kept tail,
+ * and the cut items come back retired. */
+static void test_undo_record_retires_and_reappends(void)
 {
     use_fresh_session_state();
     struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
     EXPECT(log != NULL);
     char *path = xstrdup(session_log_path(log));
     session_log_append(log, UNDO_CONVERSATION, 9);
+    size_t size_before = 0;
+    free(fs_read_file(path, &size_before));
 
-    EXPECT(session_log_truncate(log, 2, 6) == 0);
+    EXPECT(session_log_undo(log, 2, 6) == 0);
     struct item replacement[7];
     memcpy(replacement, UNDO_CONVERSATION, 6 * sizeof(struct item));
     replacement[6] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"redo"};
     session_log_append(log, replacement, 7);
     session_log_close(log);
 
-    struct item *items;
-    size_t n;
-    EXPECT(session_load(path, &items, &n, NULL) == 0);
-    EXPECT(n == 7);
-    if (n == 7) {
-        EXPECT_STR_EQ(items[5].text, "a1");
-        EXPECT_STR_EQ(items[6].text, "redo");
-    }
-    for (size_t i = 0; i < n; i++)
-        EXPECT(!(items[i].text && strcmp(items[i].text, "t2") == 0));
+    size_t size_after = 0;
+    free(fs_read_file(path, &size_after));
+    EXPECT(size_after > size_before);
 
-    free_items(items, n);
+    struct session_loaded loaded;
+    EXPECT(session_load_all(path, &loaded) == 0);
+    EXPECT(loaded.n_items == 7);
+    if (loaded.n_items == 7) {
+        EXPECT_STR_EQ(loaded.items[5].text, "a1");
+        EXPECT_STR_EQ(loaded.items[6].text, "redo");
+    }
+    EXPECT(count_text(loaded.items, loaded.n_items, "t2") == 0);
+    EXPECT(loaded.n_retired == 3);
+    EXPECT(count_text(loaded.retired, loaded.n_retired, "t2") == 1);
+    session_loaded_free(&loaded);
     free(path);
 }
 
-static void test_truncate_all_turns(void)
+static void test_undo_record_can_retire_everything(void)
 {
     use_fresh_session_state();
     struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
@@ -652,18 +669,89 @@ static void test_truncate_all_turns(void)
     char *path = xstrdup(session_log_path(log));
     session_log_append(log, UNDO_CONVERSATION, 9);
 
-    EXPECT(session_log_truncate(log, 0, 0) == 0);
+    EXPECT(session_log_undo(log, 0, 0) == 0);
     session_log_close(log);
-    struct item *items;
-    size_t n;
-    EXPECT(session_load(path, &items, &n, NULL) == 0);
-    EXPECT(n == 0);
-
-    free_items(items, n);
+    struct session_loaded loaded;
+    EXPECT(session_load_all(path, &loaded) == 0);
+    EXPECT(loaded.n_items == 0);
+    EXPECT(loaded.n_retired == 9);
+    session_loaded_free(&loaded);
     free(path);
 }
 
-static void test_fork_copies_prefix_without_touching_source(void)
+/* A second undo after new user turns is counted over the live conversation of its moment, so the
+ * loader must apply records in order rather than against the raw item stream. */
+static void test_nested_undo_records_replay_in_order(void)
+{
+    use_fresh_session_state();
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
+    EXPECT(log != NULL);
+    char *path = xstrdup(session_log_path(log));
+    session_log_append(log, UNDO_CONVERSATION, 9);
+    EXPECT(session_log_undo(log, 1, 3) == 0);
+    struct item redo[6];
+    memcpy(redo, UNDO_CONVERSATION, 3 * sizeof(struct item));
+    redo[3] = (struct item){.kind = ITEM_TURN_BOUNDARY};
+    redo[4] = (struct item){.kind = ITEM_USER_MESSAGE, .text = (char *)"t1b"};
+    redo[5] = (struct item){.kind = ITEM_ASSISTANT_MESSAGE, .text = (char *)"a1b"};
+    session_log_append(log, redo, 6);
+    EXPECT(session_log_undo(log, 1, 3) == 0);
+    session_log_close(log);
+
+    struct session_loaded loaded;
+    EXPECT(session_load_all(path, &loaded) == 0);
+    EXPECT(loaded.n_items == 3);
+    if (loaded.n_items == 3)
+        EXPECT_STR_EQ(loaded.items[1].text, "t0");
+    EXPECT(loaded.n_retired == 9);
+    EXPECT(count_text(loaded.retired, loaded.n_retired, "t1") == 1);
+    EXPECT(count_text(loaded.retired, loaded.n_retired, "t1b") == 1);
+    session_loaded_free(&loaded);
+    free(path);
+}
+
+static void test_user_turn_records_sum_worked_time(void)
+{
+    use_fresh_session_state();
+    struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
+    EXPECT(log != NULL);
+    char *path = xstrdup(session_log_path(log));
+    /* Nothing recorded before the header exists. */
+    session_log_user_turn(log, 500);
+    session_log_append(log, UNDO_CONVERSATION, 3);
+    session_log_user_turn(log, 1200);
+    session_log_append(log, UNDO_CONVERSATION, 6);
+    session_log_user_turn(log, 800);
+    session_log_close(log);
+
+    struct session_loaded loaded;
+    EXPECT(session_load_all(path, &loaded) == 0);
+    EXPECT(loaded.worked_ms == 2000);
+    EXPECT(loaded.last_user_turn_ms == 800);
+    session_loaded_free(&loaded);
+
+    /* Undoing the newest turn keeps its time on the books but no longer offers it as the last
+     * turn's duration, which would describe the wrong prompt on resume. */
+    log = session_log_resume(path, "pa", "ma", NULL, NULL, 6);
+    EXPECT(log != NULL);
+    EXPECT(session_log_undo(log, 1, 3) == 0);
+    session_log_close(log);
+    EXPECT(session_load_all(path, &loaded) == 0);
+    EXPECT(loaded.worked_ms == 2000);
+    EXPECT(loaded.last_user_turn_ms == -1);
+    session_loaded_free(&loaded);
+
+    /* A file without timing records reports none rather than zero. */
+    char *plain = write_session("pa", "ma", NULL, NULL, UNDO_CONVERSATION, 3);
+    EXPECT(session_load_all(plain, &loaded) == 0);
+    EXPECT(loaded.worked_ms == 0);
+    EXPECT(loaded.last_user_turn_ms == -1);
+    session_loaded_free(&loaded);
+    free(plain);
+    free(path);
+}
+
+static void test_fork_writes_prefix_as_inherited_without_touching_source(void)
 {
     use_fresh_session_state();
     char *source_path = write_session("pa", "ma", "hi", NULL, UNDO_CONVERSATION, 9);
@@ -675,8 +763,10 @@ static void test_fork_copies_prefix_without_touching_source(void)
     free_items(items, n);
     session_meta_free(&meta);
 
+    /* The source ran on pa/ma/hi; the branch is forked from a live selection that moved on. */
+    struct session_header selection = {.provider = "pb", .model = "mb", .model_label = "Model B"};
     char *fork_path = NULL;
-    EXPECT(session_fork_file(source_path, 1, &fork_path) == 0);
+    EXPECT(session_fork_file(source_path, UNDO_CONVERSATION, 3, &selection, &fork_path) == 0);
     EXPECT(fork_path != NULL);
     if (fork_path) {
         EXPECT(session_load(fork_path, &items, &n, &meta) == 0);
@@ -684,11 +774,12 @@ static void test_fork_copies_prefix_without_touching_source(void)
         if (n == 3)
             EXPECT_STR_EQ(items[1].text, "t0");
         for (size_t i = 0; i < n; i++)
-            EXPECT(!(items[i].text && strcmp(items[i].text, "t1") == 0));
+            EXPECT(items[i].inherited);
+        EXPECT(count_text(items, n, "t1") == 0);
         EXPECT(meta.id != NULL && strcmp(meta.id, source_id) != 0);
-        EXPECT_STR_EQ(meta.provider, "pa");
-        EXPECT_STR_EQ(meta.model, "ma");
-        EXPECT_STR_EQ(meta.effort, "hi");
+        EXPECT_STR_EQ(meta.provider, "pb");
+        EXPECT_STR_EQ(meta.model, "mb");
+        EXPECT(meta.effort == NULL); /* the source's effort does not leak into the branch */
         free_items(items, n);
         session_meta_free(&meta);
 
@@ -705,16 +796,9 @@ static void test_fork_copies_prefix_without_touching_source(void)
 
     EXPECT(session_load(source_path, &items, &n, NULL) == 0);
     EXPECT(n == 9);
+    for (size_t i = 0; i < n; i++)
+        EXPECT(!items[i].inherited);
     free_items(items, n);
-
-    char *clone_path = NULL;
-    EXPECT(session_fork_file(source_path, 3, &clone_path) == 0);
-    if (clone_path) {
-        EXPECT(session_load(clone_path, &items, &n, NULL) == 0);
-        EXPECT(n == 9);
-        free_items(items, n);
-        free(clone_path);
-    }
 
     free(source_id);
     free(source_path);
@@ -799,7 +883,9 @@ static void test_discarded_selection_stays_out_of_log(void)
     free(path);
 }
 
-static void test_truncate_restates_live_selection(void)
+/* Selection records inside undone user turns still apply: the live selection does not revert with
+ * the conversation, so the file's effective selection must not either. */
+static void test_undo_keeps_effective_selection(void)
 {
     use_fresh_session_state();
     struct session_log *log = session_log_open("pa", "ma", NULL, NULL, NULL);
@@ -809,7 +895,7 @@ static void test_truncate_restates_live_selection(void)
     session_log_set_meta(log, "pb", "mb", NULL, NULL, "stance");
     session_log_append(log, UNDO_CONVERSATION, 9);
 
-    EXPECT(session_log_truncate(log, 1, 3) == 0);
+    EXPECT(session_log_undo(log, 1, 3) == 0);
     session_log_append(log, UNDO_CONVERSATION, 6);
     session_log_close(log);
 
@@ -941,12 +1027,14 @@ int main(void)
     test_log_materialization();
     test_log_id_follows_conversation();
     test_log_begin_materializes_before_any_item();
-    test_truncate_and_reappend();
-    test_truncate_all_turns();
-    test_fork_copies_prefix_without_touching_source();
+    test_undo_record_retires_and_reappends();
+    test_undo_record_can_retire_everything();
+    test_nested_undo_records_replay_in_order();
+    test_user_turn_records_sum_worked_time();
+    test_fork_writes_prefix_as_inherited_without_touching_source();
     test_selection_metadata_tracks_productive_switches();
     test_discarded_selection_stays_out_of_log();
-    test_truncate_restates_live_selection();
+    test_undo_keeps_effective_selection();
     test_read_meta_failure_initializes_output();
     test_session_readers_reject_fifo();
     test_load_enforces_image_count_cap();

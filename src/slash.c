@@ -9,7 +9,7 @@
 
 #include "agent.h"
 #include "agent_core.h"
-#include "agent_usage.h"
+#include "agent_stats.h"
 #include "catalog.h"
 #include "config.h"
 #include "file_mention.h"
@@ -100,14 +100,14 @@ static const struct slash_command COMMANDS[] = {
     },
     {
         .name = "undo",
-        .summary = "revert conversation to before an earlier message (optional: turns back)",
+        .summary = "revert conversation to before an earlier message (optional: user turns back)",
         .accepts_argument = 1,
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_undo,
     },
     {
         .name = "fork",
-        .summary = "branch a new session before an earlier message (optional: turns back)",
+        .summary = "branch a new session before an earlier message (optional: user turns back)",
         .accepts_argument = 1,
         .display = COMMAND_DISPLAY_MANAGED,
         .handler = run_fork,
@@ -387,7 +387,7 @@ static void run_history_action(const struct command_call *call, enum history_act
 
     long turn_index;
     if (call->argument) {
-        /* N counts turns back from the end: 1 is the most recent turn, `turn_count`
+        /* N counts user turns back from the end: 1 is the most recent, `turn_count`
          * the first. /fork also accepts 0 — the current tip — which clones the
          * whole conversation; that stays valid even when the only user item is
          * a compaction seed (turn_count 0), as long as there's history to copy.
@@ -529,8 +529,26 @@ static int session_value_indent(int columns)
     return columns - value_column >= UI_ROW_MIN_TEXT_CELLS ? value_column : UI_ROW_STACKED_INDENT;
 }
 
-static void print_session_row(const char *label, const char *value)
+/* Rows come in groups — identity, the live conversation, accounting — separated by a blank line
+ * only when both sides printed something. */
+struct session_rows {
+    int printed_in_group;
+    int separator_pending;
+};
+
+static void session_rows_group(struct session_rows *rows)
 {
+    rows->separator_pending = rows->printed_in_group;
+    rows->printed_in_group = 0;
+}
+
+static void print_session_row(struct session_rows *rows, const char *label, const char *value)
+{
+    if (rows->separator_pending) {
+        putchar('\n');
+        rows->separator_pending = 0;
+    }
+    rows->printed_in_group = 1;
     ui_label_row(label, ANSI_DIM, value, ANSI_DIM, 2 + SESSION_LABEL_WIDTH, display_width());
 }
 
@@ -644,19 +662,37 @@ static void run_tasks(const struct command_call *call)
     free(tasks);
 }
 
-/* Stats cover the current process: /new resets them and /resume does not restore old totals. */
+/* Tokens by billing category, each with its rate estimate when known. */
+static void format_usage_row(char *row, size_t row_size, const struct agent_stats_totals *usage)
+{
+    const struct catalog_split *split = usage->split_available ? &usage->split : NULL;
+    int row_length = append_token_segment(row, row_size, 0, "in", usage->uncached_input_tokens,
+                                          split ? split->cost_input : -1);
+    if (usage->cached_tokens > 0)
+        row_length = append_token_segment(row, row_size, row_length, "cache", usage->cached_tokens,
+                                          split ? split->cost_cache_read : -1);
+    if (usage->cache_write_tokens > 0)
+        row_length =
+            append_token_segment(row, row_size, row_length, "write", usage->cache_write_tokens,
+                                 split ? split->cost_cache_write : -1);
+    append_token_segment(row, row_size, row_length, "out", usage->output_tokens,
+                         split ? split->cost_output : -1);
+}
+
+/* Totals describe the recorded conversation — undone user turns and retried requests included — so
+ * a resumed session reports what the live one did. */
 static void run_session(const struct command_call *call)
 {
     struct agent_state *state = call->state;
-    const struct session_stats *stats = &state->stats;
-    char row[160], formatted[32];
+    struct session_rows rows = {0};
+    char row[256], formatted[32];
 
     const char *hint = session_log_resume_hint(state->session_log);
-    print_session_row("session", hint ? hint : "not recorded");
+    print_session_row(&rows, "session", hint ? hint : "not recorded");
 
     const char *preset = config_str("preset");
     if (preset && *preset)
-        print_session_row("preset", preset);
+        print_session_row(&rows, "preset", preset);
 
     /* Report the effort the next request will carry after metadata resolution. */
     agent_session_resync_effort(state->session, state->provider, NULL);
@@ -679,78 +715,104 @@ static void run_session(const struct command_call *call)
         else
             snprintf(row, sizeof(row), "%s\n%s", provider_name, model);
     }
-    print_session_row("provider", row);
+    print_session_row(&rows, "provider", row);
 
-    if (stats->user_turns > 0) {
-        snprintf(row, sizeof(row), "%ld", stats->user_turns);
-        print_session_row("user turns", row);
+    struct agent_stats stats;
+    memset(&stats, 0, sizeof(stats));
+    if (state->session)
+        agent_stats_collect(state->session, 0, 0, state->provider, &stats);
+
+    /* The live conversation. "User turn" throughout: a turn alone is a provider round-trip,
+     * which is what requests counts below. */
+    session_rows_group(&rows);
+    if (stats.user_turns > 0 || stats.undone_user_turns > 0) {
+        if (stats.undone_user_turns > 0)
+            snprintf(row, sizeof(row), "%ld · %ld undone", stats.user_turns,
+                     stats.undone_user_turns);
+        else
+            snprintf(row, sizeof(row), "%ld", stats.user_turns);
+        print_session_row(&rows, "user turns", row);
     }
 
-    if (stats->requests > 0) {
-        snprintf(row, sizeof(row), "%ld", stats->requests);
-        print_session_row("requests", row);
-    }
-
-    if (stats->tool_calls > 0) {
-        int row_length = snprintf(row, sizeof(row), "%ld", stats->tool_calls);
-        for (size_t i = 0; i < SESSION_STATS_MAX_TOOLS && stats->tools[i].name; i++) {
+    if (stats.tool_calls > 0) {
+        int row_length = snprintf(row, sizeof(row), "%ld", stats.tool_calls);
+        for (size_t i = 0; i < AGENT_STATS_MAX_TOOLS && stats.tools[i].name; i++) {
             if (row_length < 0 || (size_t)row_length >= sizeof(row))
                 break;
             row_length += snprintf(row + row_length, sizeof(row) - (size_t)row_length, " · %s %ld",
-                                   stats->tools[i].name, stats->tools[i].count);
+                                   stats.tools[i].name, stats.tools[i].count);
         }
-        print_session_row("tool calls", row);
-    }
-
-    if (stats->worked_ms > 0) {
-        format_duration(formatted, sizeof(formatted), stats->worked_ms);
-        print_session_row("time worked", formatted);
+        print_session_row(&rows, "tool calls", row);
     }
 
     /* Context is the latest request's window use. Until a request reports usage — a fresh
      * session, or a compaction or history cut invalidated the snapshot — usage is unknown
      * rather than zero, but the resolved window is still worth showing. */
-    if (stats->latest_context_tokens > 0) {
-        format_context(row, sizeof(row), stats->latest_context_tokens, stats->context_limit);
-        print_session_row("context", row);
-    } else {
-        long window =
-            model_meta_context(state->provider, state->session ? state->session->model : NULL);
-        if (window > 0) {
-            format_context(row, sizeof(row), -1, window);
-            print_session_row("context", row);
+    long window =
+        model_meta_context(state->provider, state->session ? state->session->model : NULL);
+    if (stats.context_tokens > 0) {
+        format_context(row, sizeof(row), stats.context_tokens, window);
+        print_session_row(&rows, "context", row);
+    } else if (window > 0) {
+        format_context(row, sizeof(row), -1, window);
+        print_session_row(&rows, "context", row);
+    }
+
+    /* Accounting: everything the session did, undone user turns and retried requests included. */
+    session_rows_group(&rows);
+    if (stats.total.requests > 0) {
+        snprintf(row, sizeof(row), "%ld", stats.total.requests);
+        print_session_row(&rows, "requests", row);
+    }
+
+    if (stats.worked_ms > 0) {
+        format_duration(formatted, sizeof(formatted), stats.worked_ms);
+        print_session_row(&rows, "time worked", formatted);
+    }
+
+    /* Category costs are rate estimates even when the provider reported an exact total charge.
+     * A conversation that switched models gets one row per model, since a single row would sum
+     * tokens billed at different rates. */
+    if (stats.total.input_tokens > 0 || stats.total.output_tokens > 0) {
+        if (stats.n_models > 1) {
+            /* Each row reads like a transcript footer: the model's spend, then its tokens. */
+            for (size_t i = 0; i < stats.n_models; i++) {
+                const struct agent_stats_model *entry = &stats.models[i];
+                char tokens[200];
+                format_usage_row(tokens, sizeof(tokens), &entry->totals);
+                char spend[40] = "";
+                if (entry->totals.spend > 0) {
+                    format_cost(formatted, sizeof(formatted), entry->totals.spend);
+                    snprintf(spend, sizeof(spend), "%s%s · ",
+                             entry->totals.spend_estimated ? "~" : "", formatted);
+                }
+                snprintf(row, sizeof(row), "%s · %s\n%s%s", entry->provider ? entry->provider : "?",
+                         entry->model ? entry->model : "?", spend, tokens);
+                print_session_row(&rows, i == 0 ? "tokens" : "", row);
+            }
+        } else {
+            format_usage_row(row, sizeof(row), &stats.total);
+            print_session_row(&rows, "tokens", row);
         }
     }
 
-    /* Category costs are rate estimates even when the provider reported an exact total charge. */
-    if (stats->input_tokens > 0 || stats->output_tokens > 0) {
-        struct catalog_split split;
-        int split_available = agent_spend_split(&stats->spend, &split);
-        long cached_tokens = stats->cached_tokens > 0 ? stats->cached_tokens : 0;
-        long cache_write_tokens = stats->cache_write_tokens > 0 ? stats->cache_write_tokens : 0;
-        int row_length = 0;
-        row_length =
-            append_token_segment(row, sizeof(row), row_length, "in", stats->uncached_input_tokens,
-                                 split_available ? split.cost_input : -1);
-        if (cached_tokens > 0)
-            row_length = append_token_segment(row, sizeof(row), row_length, "cache", cached_tokens,
-                                              split_available ? split.cost_cache_read : -1);
-        if (cache_write_tokens > 0)
-            row_length =
-                append_token_segment(row, sizeof(row), row_length, "write", cache_write_tokens,
-                                     split_available ? split.cost_cache_write : -1);
-        append_token_segment(row, sizeof(row), row_length, "out", stats->output_tokens,
-                             split_available ? split.cost_output : -1);
-        print_session_row("tokens total", row);
+    /* A mixed reported/estimated total remains an estimate. */
+    if (stats.total.spend > 0) {
+        format_cost(formatted, sizeof(formatted), stats.total.spend);
+        snprintf(row, sizeof(row), "%s%s", stats.total.spend_estimated ? "~" : "", formatted);
+        print_session_row(&rows, "spend", row);
     }
 
-    /* A mixed reported/estimated total remains an estimate. */
-    int estimated = 0;
-    double spend = agent_session_spend(stats, &estimated);
-    if (spend > 0) {
-        format_cost(formatted, sizeof(formatted), spend);
-        snprintf(row, sizeof(row), "%s%s", estimated ? "~" : "", formatted);
-        print_session_row("spend", row);
+    /* Last, because it is the one cost the spend above does not include. */
+    if (stats.inherited_user_turns > 0) {
+        int row_length = snprintf(row, sizeof(row), "%ld user turn%s", stats.inherited_user_turns,
+                                  stats.inherited_user_turns == 1 ? "" : "s");
+        if (stats.inherited.spend > 0 && row_length > 0 && (size_t)row_length < sizeof(row)) {
+            format_cost(formatted, sizeof(formatted), stats.inherited.spend);
+            snprintf(row + row_length, sizeof(row) - (size_t)row_length, " · %s%s",
+                     stats.inherited.spend_estimated ? "~" : "", formatted);
+        }
+        print_session_row(&rows, "inherited", row);
     }
 }
 
