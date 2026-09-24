@@ -437,7 +437,7 @@ static void show_history_cb(void *user)
     size_t prompts = agent_user_turn_count(session);
     struct banner_writer header;
     banner_open(&header, memory_stream);
-    banner_put(&header, "", ANSI_DIM, ANSI_BOLD_OFF, "conversation history");
+    banner_put(&header, "", ANSI_DIM, ANSI_BOLD_OFF, "conversation");
     if (prompts > 0) {
         char count[32];
         snprintf(count, sizeof(count), "%zu prompt%s", prompts, prompts == 1 ? "" : "s");
@@ -1065,6 +1065,12 @@ static void repl_loop_task_note(const char *text, void *user)
     disp_flush(&render->disp);
 }
 
+static char *slash_hint_cb(const char *buf, void *user)
+{
+    (void)user;
+    return slash_hint(buf);
+}
+
 static int handle_slash_input(struct input *input, struct agent_state *state, const char *line)
 {
     if (!*line)
@@ -1163,9 +1169,15 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
                              session.model_label, session.effort, config_str("preset"));
     }
     struct input *input = input_new();
-    /* Prompt recall remains readable when recording is disabled. */
-    input_history_open_default(input, recording_enabled);
-    input_set_modal_completer(input, &file_mention_completer);
+    /* Prompt recall is scoped like sessions and remains readable when recording is disabled. */
+    char *cwd = getcwd(NULL, 0);
+    char *history_path = session_prompt_history_path(cwd);
+    input_history_open_tty(input, history_path, recording_enabled);
+    free(history_path);
+    free(cwd);
+    input_add_completer(input, &slash_completer);
+    input_add_completer(input, &file_mention_completer);
+    input_set_hint(input, slash_hint_cb, NULL);
     input_set_paste_hook(input, capture_paste, NULL);
     input_set_paste_filter(input, filter_paste, NULL);
     /* Raw mode clears IEXTEN, so Ctrl-O does not trigger BSD/macOS VDISCARD. */
