@@ -63,9 +63,9 @@ static void test_spinner_is_null_and_silent_without_tty(void)
     spinner_set_label(spinner, "thinking", "thinking...");
     spinner_request_label(spinner, "reading", "reading...");
     spinner_set_timer(spinner, 1);
-    spinner_set_live_info(spinner, "67k / 266k (25%) · ~$0.038");
-    spinner_set_live_info(spinner, NULL);
-    spinner_set_live_info(spinner, "");
+    spinner_set_live_info(spinner, "67k / 266k (25%) · ~$0.038", 0, 0);
+    spinner_set_live_info(spinner, NULL, 0, 0);
+    spinner_set_live_info(spinner, "", 0, 0);
     spinner_park(spinner, 4);
     struct spinner_row row = {.bytes = "| live output", .cells = 13};
     spinner_set_tool_status_view(spinner, &row, 1);
@@ -83,31 +83,37 @@ static void test_label_frame_layout(void)
     struct buf frame;
     buf_init(&frame);
 
-    spinner_build_label_frame(&frame, "[write] composing...", "67k / 266k (25%) · ~$0.038", "*",
-                              151000, 100);
+    spinner_build_label_frame(&frame, "[write] composing...", "67k / 266k (25%) · ~$0.038", 0, 0,
+                              "*", 151000, 100);
     EXPECT_STR_EQ(frame.data,
                   "\r" ANSI_DIM "* 2m 31s · 67k / 266k (25%) · ~$0.038 "
                   "[write] composing..." ANSI_RESET ANSI_ERASE_LINE);
 
     buf_reset(&frame);
-    spinner_build_label_frame(&frame, "working...", "67k / 266k (25%)", "*", 29999, 80);
+    spinner_build_label_frame(&frame, "working...", "300k / 262k (114%)", 13, 4, "*", -1,
+                              80);
+    EXPECT_STR_EQ(frame.data, "\r" ANSI_DIM "* 300k / 262k (" ANSI_RED "114%" ANSI_FG_DEFAULT
+                              ") working..." ANSI_RESET ANSI_ERASE_LINE);
+
+    buf_reset(&frame);
+    spinner_build_label_frame(&frame, "working...", "67k / 266k (25%)", 0, 0, "*", 29999, 80);
     EXPECT_STR_EQ(frame.data, "\r" ANSI_DIM "* 67k / 266k (25%) working..." ANSI_RESET
                               ANSI_ERASE_LINE);
 
     buf_reset(&frame);
-    spinner_build_label_frame(&frame, "working...", NULL, "*", 151000, 80);
+    spinner_build_label_frame(&frame, "working...", NULL, 0, 0, "*", 151000, 80);
     EXPECT_STR_EQ(frame.data, "\r" ANSI_DIM "* 2m 31s · working..." ANSI_RESET ANSI_ERASE_LINE);
 
     buf_reset(&frame);
-    spinner_build_label_frame(&frame, "[write] composing...", "67k / 266k (25%)", "*", 151000,
-                              20);
+    spinner_build_label_frame(&frame, "[write] composing...", "67k / 266k (25%)", 0, 0, "*",
+                              151000, 20);
     EXPECT(strstr(frame.data, "67k") == NULL);
     EXPECT(strstr(frame.data, " 2m ") == NULL);
     EXPECT(strstr(frame.data, "[write] compos...") != NULL);
     EXPECT(strstr(frame.data, "\n") == NULL);
 
     buf_reset(&frame);
-    spinner_build_label_frame(&frame, "你好abc", "context", "*", -1, 8);
+    spinner_build_label_frame(&frame, "你好abc", "context", 0, 0, "*", -1, 8);
     EXPECT(strstr(frame.data, "context") == NULL);
     EXPECT(strstr(frame.data, "你...") != NULL);
     EXPECT(strstr(frame.data, "\n") == NULL);

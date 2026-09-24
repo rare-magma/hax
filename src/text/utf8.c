@@ -64,7 +64,7 @@ int utf8_is_valid(const char *bytes, size_t length)
     return 1;
 }
 
-size_t utf8_encode(uint32_t codepoint, char out[4])
+size_t hax_utf8_encode(uint32_t codepoint, char out[4])
 {
     if ((codepoint >= 0xD800 && codepoint <= 0xDFFF) || codepoint > 0x10FFFF)
         return 0;

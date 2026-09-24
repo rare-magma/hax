@@ -56,6 +56,8 @@ struct spinner {
 
     long timer_started_at_ms;
     char *live_info;
+    size_t live_info_highlight_start;
+    size_t live_info_highlight_length;
     int parked_rows;
     int origin_col;
     /* A swap bracket opened by spinner_swap_begin() and not yet closed. */
@@ -82,8 +84,28 @@ const char *spinner_glyph_now(void)
     return SPINNER_FRAMES[frame];
 }
 
+static void append_live_info(struct buf *frame, const char *info, size_t highlight_start,
+                             size_t highlight_length)
+{
+    size_t info_length = strlen(info);
+    if (highlight_length == 0 || highlight_start >= info_length) {
+        buf_append_str(frame, info);
+        return;
+    }
+
+    size_t available = info_length - highlight_start;
+    if (highlight_length > available)
+        highlight_length = available;
+    buf_append(frame, info, highlight_start);
+    buf_append_str(frame, theme_open(THEME_ERROR));
+    buf_append(frame, info + highlight_start, highlight_length);
+    buf_append_str(frame, theme_close(THEME_ERROR));
+    buf_append_str(frame, info + highlight_start + highlight_length);
+}
+
 void spinner_build_label_frame(struct buf *frame, const char *label, const char *info,
-                               const char *glyph, long elapsed_ms, int terminal_cols)
+                               size_t highlight_start, size_t highlight_length, const char *glyph,
+                               long elapsed_ms, int terminal_cols)
 {
     /* Reserve the last terminal column because filling it can trigger deferred autowrap. */
     int label_budget = terminal_cols - 1 - 2; /* glyph and separating space */
@@ -119,7 +141,16 @@ void spinner_build_label_frame(struct buf *frame, const char *label, const char 
     buf_append_str(frame, glyph ? glyph : "");
     buf_append_str(frame, " ");
     if (include_prefix) {
-        buf_append(frame, prefix.data, prefix.len);
+        if (has_duration) {
+            char duration[32];
+            format_duration_steady(duration, sizeof(duration), elapsed_ms);
+            buf_append_str(frame, duration);
+        }
+        if (safe_info) {
+            if (has_duration)
+                buf_append_str(frame, " \xC2\xB7 ");
+            append_live_info(frame, safe_info, highlight_start, highlight_length);
+        }
         buf_append_str(frame, has_duration && !safe_info ? " \xC2\xB7 " : " ");
         label_budget -= (int)display_cells(prefix.data) + prefix_label_separator_cells;
     }
@@ -139,8 +170,9 @@ static void draw_label_row_locked(struct spinner *spinner, const char *glyph)
 
     struct buf frame;
     buf_init(&frame);
-    spinner_build_label_frame(&frame, spinner->displayed_label, spinner->live_info, glyph,
-                              elapsed_ms, term_width());
+    spinner_build_label_frame(&frame, spinner->displayed_label, spinner->live_info,
+                              spinner->live_info_highlight_start,
+                              spinner->live_info_highlight_length, glyph, elapsed_ms, term_width());
     fwrite(frame.data ? frame.data : "", 1, frame.len, stdout);
     fflush(stdout);
     buf_free(&frame);
@@ -498,15 +530,20 @@ void spinner_set_timer(struct spinner *spinner, long started_at_ms)
     pthread_mutex_unlock(&spinner->mutex);
 }
 
-void spinner_set_live_info(struct spinner *spinner, const char *info)
+void spinner_set_live_info(struct spinner *spinner, const char *info, size_t highlight_start,
+                           size_t highlight_length)
 {
     if (!spinner)
         return;
 
     pthread_mutex_lock(&spinner->mutex);
     char *new_info = info && *info ? xstrdup(info) : NULL;
+    size_t new_start = new_info ? highlight_start : 0;
+    size_t new_length = new_info ? highlight_length : 0;
     if ((!spinner->live_info && !new_info) ||
-        (spinner->live_info && new_info && strcmp(spinner->live_info, new_info) == 0)) {
+        (spinner->live_info && new_info && strcmp(spinner->live_info, new_info) == 0 &&
+         spinner->live_info_highlight_start == new_start &&
+         spinner->live_info_highlight_length == new_length)) {
         free(new_info);
         pthread_mutex_unlock(&spinner->mutex);
         return;
@@ -514,6 +551,8 @@ void spinner_set_live_info(struct spinner *spinner, const char *info)
 
     free(spinner->live_info);
     spinner->live_info = new_info;
+    spinner->live_info_highlight_start = new_start;
+    spinner->live_info_highlight_length = new_length;
     if (spinner->mode == SPINNER_LABEL)
         draw_frame_locked(spinner);
     pthread_mutex_unlock(&spinner->mutex);

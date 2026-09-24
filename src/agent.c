@@ -44,7 +44,6 @@
 #include "terminal/ui.h"
 #include "terminal/vt_resolve.h"
 #include "terminal/width.h"
-#include "text/fmt.h"
 #include "tools/bash_process.h"
 #include "tools/task_registry.h"
 
@@ -63,6 +62,45 @@ static const char *build_prompt(char *buffer, size_t size)
  * tables. */
 #define TABLE_SPINNER_DELAY_MS 1500
 #define CONTEXT_WARNING_PERCENT 85
+
+/* Use the raw ratio so stale metadata above the model window stays a warning too. */
+static int context_usage_warning(long context_tokens, long context_limit)
+{
+    return context_tokens >= 0 && context_limit > 0 &&
+           (double)context_tokens * 100.0 / (double)context_limit > CONTEXT_WARNING_PERCENT;
+}
+
+/* Return the byte range of the percentage in a formatted context segment. */
+static int context_percentage_span(const char *segment, size_t *start, size_t *length)
+{
+    const char *open = strstr(segment, " (");
+    if (!open)
+        return 0;
+    const char *value = open + 2;
+    const char *percent = strchr(value, '%');
+    if (!percent || percent == value)
+        return 0;
+    *start = (size_t)(value - segment);
+    *length = (size_t)(percent - value) + 1;
+    return 1;
+}
+
+static void write_context_segment(struct disp *disp, const char *segment, int warning)
+{
+    size_t start;
+    size_t length;
+    if (!warning || !context_percentage_span(segment, &start, &length)) {
+        disp_printf(disp, "%s", segment);
+        return;
+    }
+
+    disp_commit_newlines(disp);
+    disp_write(disp, segment, start);
+    disp_write_ansi(disp, theme_open(THEME_ERROR));
+    disp_write(disp, segment + start, length);
+    disp_write_ansi(disp, theme_close(THEME_ERROR));
+    disp_write(disp, segment + start + length, strlen(segment) - start - length);
+}
 
 /* ANSI must bypass disp bookkeeping or it commits a pending newline before the next separator. */
 static void md_emit_to_disp(const char *bytes, size_t byte_count, int is_raw, void *user)
@@ -101,23 +139,35 @@ void agent_display_refresh(struct agent_state *state)
 }
 
 static void update_spinner_live_info(struct render_ctx *render, const struct provider *provider,
-                                     const struct agent_session *session)
+                                     const struct agent_session *session,
+                                     long context_tokens)
 {
     struct agent_stats stats;
     agent_stats_collect(session, 0, 0, provider, &stats);
+    if (context_tokens < 0)
+        context_tokens = stats.context_tokens;
+    long context_limit = model_meta_context(provider, session->model);
     char segments[AGENT_STATS_MAX_SEGMENTS][AGENT_STATS_SEGMENT_LEN];
-    int segment_count = agent_format_stats_segments(
-        segments, stats.context_tokens, model_meta_context(provider, session->model), -1,
-        stats.total.spend, stats.total.spend_estimated);
+    int segment_count =
+        agent_format_stats_segments(segments, context_tokens, context_limit, -1, stats.total.spend,
+                                    stats.total.spend_estimated);
+    int context_warning = context_usage_warning(context_tokens, context_limit);
+    size_t highlight_start = 0;
+    size_t highlight_length = 0;
 
     struct buf info;
     buf_init(&info);
     for (int i = 0; i < segment_count; i++) {
         if (i > 0)
             buf_append_str(&info, " \xC2\xB7 ");
+        size_t segment_start = info.len;
         buf_append_str(&info, segments[i]);
+        if (context_warning && i == 0 &&
+            context_percentage_span(segments[i], &highlight_start, &highlight_length))
+            highlight_start += segment_start;
     }
-    spinner_set_live_info(render->spinner, info.data ? info.data : NULL);
+    spinner_set_live_info(render->spinner, info.data ? info.data : NULL, highlight_start,
+                          highlight_length);
     buf_free(&info);
 }
 
@@ -144,8 +194,7 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
     int width = display_width();
     int column = 0;
     int context_segment = elapsed_ms >= 0 ? 1 : 0;
-    int context_warning =
-        context_percentage(stats.context_tokens, context_limit) > CONTEXT_WARNING_PERCENT;
+    int context_warning = context_usage_warning(stats.context_tokens, context_limit);
     for (int i = 0; i < segment_count; i++) {
         int segment_width = (int)strlen(segments[i]);
         if (column > 0) {
@@ -157,14 +206,7 @@ static void display_stats_line(struct render_ctx *render, const struct provider 
                 column += 3;
             }
         }
-        int warn_context = context_warning && i == context_segment;
-        if (warn_context) {
-            disp_commit_newlines(disp);
-            disp_write_ansi(disp, theme_open(THEME_ERROR));
-        }
-        disp_printf(disp, "%s", segments[i]);
-        if (warn_context)
-            disp_write_ansi(disp, theme_close(THEME_ERROR));
+        write_context_segment(disp, segments[i], context_warning && i == context_segment);
         column += segment_width;
     }
     disp_write_ansi(disp, ANSI_RESET);
@@ -994,9 +1036,32 @@ struct repl_loop_ctx {
     struct agent_state *state;
 };
 
+/* Prefill totals and terminal usage are the live context measurements available before the footer
+ * is appended to the session. */
+static long stream_event_context_tokens(const struct stream_event *event)
+{
+    if (event->kind == EV_PROGRESS)
+        return event->u.progress.total > 0 ? event->u.progress.total : -1;
+
+    const struct stream_usage *usage = NULL;
+    if (event->kind == EV_RETRY)
+        usage = event->u.retry.usage;
+    else if (event->kind == EV_DONE)
+        usage = &event->u.done.usage;
+    else if (event->kind == EV_ERROR)
+        usage = event->u.error.usage;
+    if (!usage || usage->input_tokens < 0 || usage->output_tokens < 0)
+        return -1;
+    return usage->input_tokens + usage->output_tokens;
+}
+
 static int repl_loop_on_event(const struct stream_event *event, void *user)
 {
     struct repl_loop_ctx *ctx = user;
+    long context_tokens = stream_event_context_tokens(event);
+    if (context_tokens >= 0)
+        update_spinner_live_info(ctx->state->render, ctx->state->provider, ctx->state->session,
+                                 context_tokens);
     return render_on_event(event, ctx->state->render);
 }
 
@@ -1010,7 +1075,7 @@ static void repl_loop_turn_begin(void *user)
 {
     struct repl_loop_ctx *ctx = user;
     render_stream_begin(ctx->state->render);
-    update_spinner_live_info(ctx->state->render, ctx->state->provider, ctx->state->session);
+    update_spinner_live_info(ctx->state->render, ctx->state->provider, ctx->state->session, -1);
 }
 
 static int repl_loop_checkpoint(void *user)
@@ -1316,7 +1381,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         /* Reset promoted spinner state before timing the new user turn. */
         spinner_set_label(render.spinner, "working", "working...");
-        update_spinner_live_info(&render, current_provider, &session);
+        update_spinner_live_info(&render, current_provider, &session, -1);
         spinner_set_timer(render.spinner, user_turn_start_ms);
 
         /* Clear stale editor interrupts before arming first-Esc pause and second-Esc abort. */
@@ -1356,7 +1421,7 @@ int agent_run(struct provider **provider_io, const struct hax_opts *options)
 
         /* Close active rendering before post-turn output can emit terminal control sequences. */
         render_set_mode(&render, RENDER_IDLE);
-        spinner_set_live_info(render.spinner, NULL);
+        spinner_set_live_info(render.spinner, NULL, 0, 0);
 
         /* History and the resume hint already expose interruptions; another live marker duplicates
          * them. */

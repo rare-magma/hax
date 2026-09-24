@@ -2,6 +2,8 @@
 #ifndef HAX_RENDER_SPINNER_H
 #define HAX_RENDER_SPINNER_H
 
+#include <stddef.h>
+
 /* Thread-safe live indicators written directly to stdout, for interactive terminals only.
  * Operations taking a spinner pointer are NULL-safe no-ops.
  *
@@ -68,8 +70,10 @@ void spinner_request_label(struct spinner *spinner, const char *key, const char 
 void spinner_set_timer(struct spinner *spinner, long started_at_ms);
 
 /* Replace the optional copied metadata prefix on labeled rows. NULL or empty values clear it;
- * metadata is not shown on tool-status rows. */
-void spinner_set_live_info(struct spinner *spinner, const char *info);
+ * metadata is not shown on tool-status rows. The optional byte range is colored with THEME_ERROR;
+ * callers provide the range in bytes. */
+void spinner_set_live_info(struct spinner *spinner, const char *info, size_t highlight_start,
+                           size_t highlight_length);
 
 /* Return a borrowed, NUL-terminated one-cell UTF-8 glyph selected from monotonic time. */
 const char *spinner_glyph_now(void);
@@ -78,9 +82,11 @@ struct buf;
 
 /* Build one complete labeled-row repaint. The frame is terminal-independent apart from its fixed
  * ANSI repaint controls. `elapsed_ms` is negative when the timer is disabled. Metadata is included
- * as a whole only when it and the untruncated label fit the row. */
+ * as a whole only when it and the untruncated label fit the row; the optional byte range in `info`
+ * is colored with THEME_ERROR. */
 void spinner_build_label_frame(struct buf *frame, const char *label, const char *info,
-                               const char *glyph, long elapsed_ms, int terminal_cols);
+                               size_t highlight_start, size_t highlight_length, const char *glyph,
+                               long elapsed_ms, int terminal_cols);
 
 /* Cell widths of the physical rows painted by one tool-view frame, for reflow-aware repaints. */
 struct spinner_tool_frame {

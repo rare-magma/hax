@@ -131,6 +131,7 @@ static void test_context_percentage(void)
     EXPECT(context_percentage(86, 100) == 86);
     EXPECT(context_percentage(-1, 100) == -1);
     EXPECT(context_percentage(86, 0) == -1);
+    EXPECT(context_percentage(300000, 262144) == 114); /* over the window remains measurable */
     EXPECT(context_percentage(1000, 1) == 999);
 }
 
