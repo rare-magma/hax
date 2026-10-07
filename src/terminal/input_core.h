@@ -86,8 +86,8 @@ struct input {
     char *(*paste_filter)(const char *text, void *user);
     void *paste_filter_user;
 
-    /* Enter on an empty buffer submits when set. */
-    int empty_submit;
+    /* Owned; non-NULL lets Enter submit an empty buffer, which shows it as ghost text. */
+    char *empty_placeholder;
 
     /* Ctrl-C on an empty buffer arms this; a consecutive Ctrl-C quits and
      * any other key disarms. */
@@ -158,6 +158,12 @@ char *input_core_history_decode(const char *encoded, size_t len);
 
 /* Older entries are evicted past this cap. */
 #define INPUT_CORE_HISTORY_MAX 1000
+
+/* Return the allocated dim text drawn after the buffer, or NULL: the exit confirmation, then
+ * completion candidates, then the empty-buffer placeholder, then the hint. It appears only with the
+ * cursor at the buffer end, which lets the painter erase it from the cursor, and it is sanitized
+ * because candidates and hints may echo untrusted text. */
+char *input_core_ghost_text(const struct input *in);
 
 /* ---- layout / utf-8 ---- */
 
