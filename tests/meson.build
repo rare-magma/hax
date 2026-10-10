@@ -2,6 +2,7 @@
 test_support = static_library('test_support',
     'harness.c',
     'loopback.c',
+    'output.c',
     'tools/bash_fixtures.c',
     dependencies: [hax_dep],
 )
@@ -53,6 +54,10 @@ test_sources = [
     'test_transcript.c',
     'test_turn.c',
     'test_xalloc.c',
+
+    'commands/test_login.c',
+    'commands/test_session_cmd.c',
+    'commands/test_tasks.c',
 
     'providers/test_anthropic_body.c',
     'providers/test_anthropic_events.c',
@@ -117,6 +122,7 @@ test_sources = [
     'text/test_display_safe.c',
     'text/test_fmt.c',
     'text/test_frontmatter.c',
+    'text/test_json_scan.c',
     'text/test_placeholder.c',
     'text/test_sha256.c',
     'text/test_shell_quote.c',
@@ -169,6 +175,7 @@ endforeach
 # e2e/test_oneshot.py registers as e2e/oneshot, so `meson test 'e2e/*'` selects the group.
 e2e_scenarios = [
     'oneshot',
+    'repl_complete',
     'repl_interrupt',
     'repl_smoke',
 ]

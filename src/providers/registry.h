@@ -52,8 +52,9 @@ struct provider_def {
     const char *reasoning_roundtrip;
     /* The endpoint rejects a thinking-mode tool loop whose assistant messages lack the replay
      * member, so each carries it, empty when there is no reasoning to replay. Needs a named
-     * member: reasoning_roundtrip, a catalog hint, or a configured field.
-     * providers.<id>.reasoning_required overrides. */
+     * member: reasoning_roundtrip, a catalog hint, or a configured field. Unset, only models
+     * whose catalog hint names the member carry it. providers.<id>.reasoning_required overrides
+     * either way. */
     int reasoning_required;
     /* Messages: "auto"/"prefer-adaptive" follow model metadata and differ only for a model the
      * catalog lacks; "adaptive"/"budget"/"off" pin. NULL → auto. */
@@ -81,7 +82,7 @@ struct provider_def {
      * generic behavior. A def with a construct override wires its provider itself instead.
      * parse_model, probe_model, and list_models refine the def's own metadata dialect and stand
      * down when a configured metadata_api moves the provider to the other one. On the OpenAI side
-     * parse_model alone also probes the active model, through the full listing. */
+     * parse_model also refines the background listing probe's entry for the active model. */
     void (*parse_model)(const json_t *entry, struct model_info *out); /* refine one /models entry */
     int (*probe_model)(struct provider *provider, const char *model, struct model_probe *probe);
     int (*list_models)(struct provider *provider, struct model_info **models, size_t *n_models,

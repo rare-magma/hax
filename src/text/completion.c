@@ -16,6 +16,19 @@ void completion_add(struct completion *completion, const char *candidate)
     completion->candidates[completion->count++] = xstrdup(candidate);
 }
 
+static int compare_candidates(const void *left, const void *right)
+{
+    return strcmp(*(char *const *)left, *(char *const *)right);
+}
+
+void completion_sort(struct completion *completion)
+{
+    /* An empty completion's array is NULL, which qsort must not receive even with a zero count. */
+    if (completion->count > 1)
+        qsort(completion->candidates, completion->count, sizeof(*completion->candidates),
+              compare_candidates);
+}
+
 void completion_keep_prefixed(struct completion *completion, const char *prefix)
 {
     size_t prefix_len = strlen(prefix);
@@ -48,17 +61,58 @@ static size_t shared_prefix_len(const struct completion *completion)
     return shared;
 }
 
+/* Return the end of the part of `candidate` that continues at byte `from`: just past the next
+ * separator, or the candidate's end. */
+static size_t part_end(const struct completion *completion, const char *candidate, size_t from)
+{
+    size_t len = strlen(candidate);
+    const char *separator =
+        completion->separator ? memchr(candidate + from, completion->separator, len - from) : NULL;
+    return separator ? (size_t)(separator + 1 - candidate) : len;
+}
+
 char *completion_extend(const struct completion *completion, const char *word)
 {
     if (completion->count == 0)
         return NULL;
-    if (completion->count == 1)
-        return xasprintf("%s ", completion->candidates[0]);
 
-    size_t shared = shared_prefix_len(completion);
-    if (shared <= strlen(word))
+    const char *first = completion->candidates[0];
+    size_t word_len = strlen(word);
+    size_t shared = completion->count == 1 ? strlen(first) : shared_prefix_len(completion);
+    size_t part = part_end(completion, first, word_len);
+    if (completion->separator && part > word_len && part <= shared &&
+        first[part - 1] == completion->separator)
+        return xasprintf("%.*s", (int)part, first);
+    if (completion->count == 1)
+        return xasprintf("%s ", first);
+    if (shared <= word_len)
         return NULL;
-    return xasprintf("%.*s", (int)shared, completion->candidates[0]);
+    return xasprintf("%.*s", (int)shared, first);
+}
+
+void completion_to_parts(struct completion *completion, const char *word)
+{
+    const char *last_separator =
+        completion->separator ? strrchr(word, completion->separator) : NULL;
+    size_t part_start = last_separator ? (size_t)(last_separator + 1 - word) : 0;
+    size_t word_len = strlen(word);
+    size_t kept = 0;
+
+    for (size_t i = 0; i < completion->count; i++) {
+        char *candidate = completion->candidates[i];
+        size_t end = part_end(completion, candidate, word_len);
+        char *part = xasprintf("%.*s", (int)(end - part_start), candidate + part_start);
+        free(candidate);
+
+        int duplicate = 0;
+        for (size_t j = 0; j < kept && !duplicate; j++)
+            duplicate = strcmp(completion->candidates[j], part) == 0;
+        if (duplicate)
+            free(part);
+        else
+            completion->candidates[kept++] = part;
+    }
+    completion->count = kept;
 }
 
 void completion_free(struct completion *completion)
@@ -69,4 +123,5 @@ void completion_free(struct completion *completion)
     completion->candidates = NULL;
     completion->count = 0;
     completion->capacity = 0;
+    completion->separator = '\0';
 }

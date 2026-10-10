@@ -17,6 +17,7 @@
 #include "provider.h"
 #include "xalloc.h"
 #include "providers/http_provider.h"
+#include "providers/openai_models.h"
 #include "providers/provider_config.h"
 #include "providers/registry.h"
 #include "transport/http.h"
@@ -171,7 +172,7 @@ static void test_api_override_moves_wire(void)
 
 /* The /models dialect and its auth scheme follow metadata_api, not the request wire: a Messages
  * endpoint can front an OpenAI-shaped catalog and vice versa. The version header marks the
- * Anthropic side; the probe hook exists only there. */
+ * Anthropic side. */
 static void test_metadata_api_override(void)
 {
     EXPECT(config_load("{\"providers\": {\"x\": {\"metadata_api\": \"openai\"}}}") == 0);
@@ -185,7 +186,7 @@ static void test_metadata_api_override(void)
     if (provider) {
         char **headers = http_provider_metadata_headers(provider);
         EXPECT(!headers_have_version(headers));
-        EXPECT(provider->probe_model == NULL);
+        EXPECT(provider->probe_model == openai_probe_model);
         string_array_free(headers);
         provider->destroy(provider);
     }
@@ -213,8 +214,8 @@ static void refine_nothing(const json_t *entry, struct model_info *out)
     (void)out;
 }
 
-/* On the OpenAI side a parse_model hook alone probes through the full listing, authenticated
- * like the listing itself. */
+/* On the OpenAI side the probe reads the full listing, authenticated like the listing itself, and
+ * a parse_model hook refines the model's entry. */
 static void test_parse_model_probes_listing(void)
 {
     EXPECT(config_load("{\"providers\": {\"x\": {\"api_key\": \"sk-test\"}}}") == 0);
@@ -232,7 +233,24 @@ static void test_parse_model_probes_listing(void)
         EXPECT(probe.headers && strcmp(probe.headers[0], "Authorization: Bearer sk-test") == 0);
         EXPECT(probe.parse_entry == refine_nothing);
         model_probe_clear(&probe);
-        EXPECT(provider->probe_model(provider, "", &probe) == -1);
+        /* Without a model the same request serves the listing alone. */
+        EXPECT(provider->probe_model(provider, NULL, &probe) == 0);
+        EXPECT_STR_EQ(probe.url, "http://example.invalid/v1/models");
+        model_probe_clear(&probe);
+    }
+    if (provider)
+        provider->destroy(provider);
+
+    /* Without parse_model the listing still serves its ids. */
+    def.parse_model = NULL;
+    provider = http_provider_new(&def);
+    EXPECT(provider != NULL && provider->probe_model != NULL);
+    if (provider && provider->probe_model) {
+        struct model_probe probe = {0};
+        EXPECT(provider->probe_model(provider, "m", &probe) == 0);
+        EXPECT_STR_EQ(probe.url, "http://example.invalid/v1/models");
+        EXPECT(probe.parse_entry == NULL);
+        model_probe_clear(&probe);
     }
     if (provider)
         provider->destroy(provider);
@@ -828,16 +846,17 @@ static void test_interleaved_reasoning_replay(void)
     EXPECT(config_load(NULL) == 0);
 }
 
-/* A def that requires the member keeps it on a reasoning-less tool call, whether the member
- * comes from a catalog hint or the def, and even when the catalog hints against replay.
- * providers.<id>.reasoning_required overrides the def either way. */
+/* A reasoning-less tool call keeps the member where the def requires it, whether the member comes
+ * from a catalog hint or the def, and even when the catalog hints against replay. Otherwise it is
+ * required where the catalog names the model's member, under a pinned name if one is configured.
+ * providers.<id>.reasoning_required overrides either way. */
 static void test_required_reasoning_replay(void)
 {
     write_catalog_fixture();
     catalog_shutdown();
     struct loopback server = {
         .response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
-        .n_requests = 5,
+        .n_requests = 10,
     };
     int port = loopback_start(&server);
     EXPECT(port > 0);
@@ -874,6 +893,15 @@ static void test_required_reasoning_replay(void)
         provider->destroy(provider);
     }
 
+    provider = http_provider_new(&plain_def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "think-hint", log_error, &log, NULL, NULL);
+        provider->stream(provider, &context, "plain", log_error, &log, NULL, NULL);
+        provider->stream(provider, &context, "no-replay", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
     EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_required\": \"off\"}}}") == 0);
     provider = http_provider_new(&def);
     EXPECT(provider != NULL);
@@ -881,8 +909,24 @@ static void test_required_reasoning_replay(void)
         provider->stream(provider, &context, "think-hint", log_error, &log, NULL, NULL);
         provider->destroy(provider);
     }
+    provider = http_provider_new(&plain_def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "think-hint", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
 
-    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_required\": \"on\"}}}") == 0);
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_required\": \"on\","
+                       " \"reasoning_roundtrip\": \"reasoning_content\"}}}") == 0);
+    provider = http_provider_new(&plain_def);
+    EXPECT(provider != NULL);
+    if (provider) {
+        provider->stream(provider, &context, "plain", log_error, &log, NULL, NULL);
+        provider->destroy(provider);
+    }
+
+    EXPECT(config_load("{\"providers\": {\"zen\": {\"reasoning_roundtrip\": \"reasoning\"}}}") ==
+           0);
     provider = http_provider_new(&plain_def);
     EXPECT(provider != NULL);
     if (provider) {
@@ -893,12 +937,18 @@ static void test_required_reasoning_replay(void)
     EXPECT(config_load(NULL) == 0);
 
     loopback_stop(&server);
-    EXPECT(atomic_load(&server.served) == 5);
+    EXPECT(atomic_load(&server.served) == 10);
     EXPECT(strstr(server.requests[0], "\"reasoning_content\":\"\"") != NULL);
     EXPECT(strstr(server.requests[1], "\"reasoning_content\":\"\"") != NULL);
     EXPECT(strstr(server.requests[2], "\"reasoning_content\":\"\"") != NULL);
-    EXPECT(strstr(server.requests[3], "reasoning_content") == NULL);
-    EXPECT(strstr(server.requests[4], "\"reasoning_content\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[3], "\"reasoning_content\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[4], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[5], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[6], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[7], "reasoning_content") == NULL);
+    EXPECT(strstr(server.requests[8], "\"reasoning_content\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[9], "\"reasoning\":\"\"") != NULL);
+    EXPECT(strstr(server.requests[9], "reasoning_content") == NULL);
 }
 
 static int construction_warns(const struct provider_def *def, const char *config)

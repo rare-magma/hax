@@ -1,5 +1,5 @@
 project('hax', 'c',
-    version: '0.5.0',
+    version: '0.6.0',
     license: 'MIT',
     default_options: [
         'c_std=c11',
@@ -90,7 +90,6 @@ sources = files(
     'src/effort.c',
     'src/file_mention.c',
     'src/history.c',
-    'src/login.c',
     'src/model_meta.c',
     'src/model_sort.c',
     'src/oneshot.c',
@@ -106,6 +105,10 @@ sources = files(
     'src/transcript.c',
     'src/turn.c',
     'src/xalloc.c',
+
+    'src/commands/login.c',
+    'src/commands/session_cmd.c',
+    'src/commands/tasks.c',
 
     'src/providers/anthropic_body.c',
     'src/providers/anthropic_events.c',
@@ -176,6 +179,7 @@ sources = files(
     'src/text/display_safe.c',
     'src/text/fmt.c',
     'src/text/frontmatter.c',
+    'src/text/json_scan.c',
     'src/text/placeholder.c',
     'src/text/sha256.c',
     'src/text/shell_quote.c',
