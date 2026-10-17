@@ -7,6 +7,27 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-15
+
+### Added
+
+- Releases now include a prebuilt macOS binary for Apple Silicon. It needs only libraries that
+  ship with macOS, so it runs without Homebrew.
+
+### Changed
+
+- The prebuilt Linux binaries are a quarter of their former size, about 2 MB, by bundling a
+  libcurl built with only what hax needs.
+
+### Fixed
+
+- OpenAI and Codex models no longer have to fill in every optional tool parameter. GPT-6 models
+  could hang or run unrequested commands, and had to set a bash timeout on every call, often far
+  above the two-minute default after which long commands move to the background.
+- The prebuilt Linux binaries connect over HTTPS on openSUSE and other distributions that keep
+  their CA bundle somewhere other than `/etc/ssl/certs/ca-certificates.crt`, instead of failing
+  every request with "Problem with the SSL CA cert".
+
 ## [0.6.0] - 2026-10-09
 
 ### Added
