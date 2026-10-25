@@ -7,6 +7,20 @@ notes (see [docs/releasing.md](docs/releasing.md)).
 
 ## [Unreleased]
 
+### Changed
+
+- Prompts are sent without leading blank lines or trailing whitespace, so a paste or Ctrl+G edit
+  that ends in a newline no longer echoes as empty rows. The first line keeps its indentation.
+  A prompt that is only whitespace sends nothing, and `-p` rejects it as empty.
+- The llama.cpp provider now connects to port 9931 by default, matching `llama-server` since
+  llama.cpp v0.7.0. For an older server, set `HAX_LLAMACPP_PORT=8080` or
+  `providers.llamacpp.port`.
+- The status line stays visible for the whole turn, including while an answer streams or a tool
+  runs, so the elapsed time and the current state, such as a requested pause, are always in view.
+- The model now always knows that `--preset <name>` starts a subagent with one of your presets,
+  so asking for a preset by name works even when no preset has a description. Presets with a
+  description are still the only ones listed for the model to pick on its own.
+
 ## [0.6.1] - 2026-10-15
 
 ### Added

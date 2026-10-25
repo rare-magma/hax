@@ -22,6 +22,7 @@
 #include "terminal/ui.h"
 #include "terminal/width.h"
 #include "text/fmt.h"
+#include "text/trim.h"
 #include "text/width.h"
 #include "tools/bash_env.h"
 
@@ -330,15 +331,6 @@ static char *read_stream(FILE *input)
     return buf_steal(&buffer);
 }
 
-static void strip_final_newline(char *text)
-{
-    size_t length = strlen(text);
-    if (length > 0 && text[length - 1] == '\n')
-        text[--length] = '\0';
-    if (length > 0 && text[length - 1] == '\r')
-        text[length - 1] = '\0';
-}
-
 int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FILE *input,
                     int input_is_tty, char **prompt)
 {
@@ -358,7 +350,6 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
             hax_err("failed to read stdin");
             return -1;
         }
-        strip_final_newline(*prompt);
     } else if (resuming) {
         return 0;
     } else {
@@ -366,7 +357,7 @@ int cli_read_prompt(const struct cli_options *options, int argc, char **argv, FI
         return -1;
     }
 
-    if (!**prompt) {
+    if (!trim_prompt(*prompt)) {
         free(*prompt);
         *prompt = NULL;
         if (resuming)

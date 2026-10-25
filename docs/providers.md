@@ -174,7 +174,7 @@ opt-out before sending proprietary code.
 
 ## llama.cpp
 
-`llama.cpp` connects to a local `llama-server`, by default at `http://127.0.0.1:8080/v1`:
+`llama.cpp` connects to a local `llama-server`, by default at `http://127.0.0.1:9931/v1`:
 
 ```sh
 llama-server -m /path/to/model.gguf -c 32768
@@ -183,8 +183,9 @@ hax --provider=llama.cpp
 
 Its config block is named `providers.llamacpp` because dots separate config path components.
 
-Use `HAX_LLAMACPP_PORT=9090` for another local port, or `HAX_LLAMACPP_BASE_URL` for a complete URL.
-If the server uses `--api-key`, set `HAX_LLAMACPP_API_KEY`.
+Use `HAX_LLAMACPP_PORT` for another local port (`8080` for llama.cpp releases before v0.7.0), or
+`HAX_LLAMACPP_BASE_URL` for a complete URL. If the server uses `--api-key`, set
+`HAX_LLAMACPP_API_KEY`.
 
 Both a classic single-model server and router mode (`llama-server` started without a model) work.
 hax adopts the model automatically when the server leaves no ambiguity — the single served model,

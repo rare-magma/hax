@@ -85,6 +85,7 @@ test_sources = [
     'render/test_ctrl_strip.c',
     'render/test_diff_color.c',
     'render/test_disp.c',
+    'render/test_footer.c',
     'render/test_markdown.c',
     'render/test_markdown_scan.c',
     'render/test_markdown_table.c',
@@ -108,10 +109,13 @@ test_sources = [
     'system/test_tempfiles.c',
 
     'terminal/test_clipboard.c',
+    'terminal/test_escape.c',
     'terminal/test_input.c',
     'terminal/test_input_core.c',
     'terminal/test_interrupt.c',
+    'terminal/test_live_region.c',
     'terminal/test_picker_core.c',
+    'terminal/test_sgr.c',
     'terminal/test_theme.c',
     'terminal/test_vt_resolve.c',
     'terminal/test_width.c',
@@ -126,6 +130,7 @@ test_sources = [
     'text/test_placeholder.c',
     'text/test_sha256.c',
     'text/test_shell_quote.c',
+    'text/test_trim.c',
     'text/test_url.c',
     'text/test_utf8.c',
     'text/test_utf8_sanitize.c',
@@ -177,7 +182,11 @@ e2e_scenarios = [
     'oneshot',
     'repl_complete',
     'repl_interrupt',
+    'repl_resize',
     'repl_smoke',
+    'repl_status',
+    'repl_status_label',
+    'repl_status_tools',
 ]
 
 python = find_program('python3')

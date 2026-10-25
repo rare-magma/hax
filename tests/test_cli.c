@@ -239,9 +239,9 @@ static void test_read_prompt_from_stream(void)
     free(prompt);
     fclose(stream);
 
-    stream = prompt_stream("first\n\n");
+    stream = prompt_stream("\nfirst\n\n");
     EXPECT(cli_read_prompt(&options, 2, argv, stream, 0, &prompt) == 0);
-    EXPECT_STR_EQ(prompt, "first\n");
+    EXPECT_STR_EQ(prompt, "first");
     free(prompt);
     fclose(stream);
 }
@@ -260,6 +260,11 @@ static void test_read_prompt_rejects_missing_or_empty_input(void)
     EXPECT(cli_read_prompt(&options, 2, argv, stream, 0, &prompt) == -1);
     EXPECT(prompt == NULL);
     fclose(stream);
+
+    char *blank_argv[] = {"hax", "--print", " ", "\n", NULL};
+    EXPECT(cli_parse(4, blank_argv, &options) == CLI_PARSE_OK);
+    EXPECT(cli_read_prompt(&options, 4, blank_argv, stdin, 1, &prompt) == -1);
+    EXPECT(prompt == NULL);
 }
 
 /* A resumed one-shot run treats a missing or empty prompt as "continue the conversation". */
