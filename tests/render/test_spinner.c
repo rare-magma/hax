@@ -30,26 +30,20 @@ static void test_status_shows_context_and_highlights_warning(void)
 {
     struct buf row;
     buf_init(&row);
-    spinner_format_status(&row, "*", "67k / 266k (25%) · ~$0.038", 0, 0, "working...", -1,
-                          80);
-    EXPECT_STR_EQ(row.data,
-                  ANSI_DIM "* 67k / 266k (25%) · ~$0.038 working..." ANSI_RESET);
+    spinner_format_status(&row, "*", "67k / 266k (25%) · ~$0.038", 0, 0, "working...", -1, 80);
+    EXPECT_STR_EQ(row.data, ANSI_DIM "* 67k / 266k (25%) · ~$0.038 working..." ANSI_RESET);
 
     buf_reset(&row);
-    spinner_format_status(&row, "*", "67k / 266k (25%) · ~$0.038", 0, 0, "working...",
-                          151000, 100);
-    EXPECT_STR_EQ(row.data, ANSI_DIM "* 2m 31s · 67k / 266k (25%) · ~$0.038 working..."
-                            ANSI_RESET);
+    spinner_format_status(&row, "*", "67k / 266k (25%) · ~$0.038", 0, 0, "working...", 151000, 100);
+    EXPECT_STR_EQ(row.data, ANSI_DIM "* 2m 31s · 67k / 266k (25%) · ~$0.038 working..." ANSI_RESET);
 
     buf_reset(&row);
     spinner_format_status(&row, "*", "300k / 262k (114%)", 13, 4, "working...", -1, 80);
-    EXPECT_STR_EQ(row.data,
-                  ANSI_DIM "* 300k / 262k (" ANSI_RED "114%" ANSI_FG_DEFAULT ") working..."
-                           ANSI_RESET);
+    EXPECT_STR_EQ(row.data, ANSI_DIM "* 300k / 262k (" ANSI_RED "114%" ANSI_FG_DEFAULT
+                                     ") working..." ANSI_RESET);
 
     buf_reset(&row);
-    spinner_format_status(&row, "*", "67k / 266k (25%)", 0, 0, "[write] composing...", 151000,
-                          20);
+    spinner_format_status(&row, "*", "67k / 266k (25%)", 0, 0, "[write] composing...", 151000, 20);
     EXPECT(strstr(row.data, "67k") == NULL);
     EXPECT(strstr(row.data, "2m 31s") == NULL);
     EXPECT(strstr(row.data, "[write]") != NULL);

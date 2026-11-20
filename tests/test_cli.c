@@ -204,7 +204,7 @@ static void test_help_wraps_to_display_width(void)
     char *out = capture_flag_output("--help");
     EXPECT(strstr(out, "usage:") != NULL);
     EXPECT(strstr(out, "--resume[=ID]") != NULL);
-    EXPECT(strstr(out, "README.md") != NULL);
+    EXPECT(strstr(out, "hax-config(5)") != NULL);
     t_expect_rows_fit(out, 60);
     free(out);
 

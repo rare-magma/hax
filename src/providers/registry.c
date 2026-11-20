@@ -44,7 +44,9 @@ static const struct provider_def DEFS[] = {
         /* The official client sends the catalog's per-model verbosity default, "low" for
          * effectively every served model; hax sends it flat rather than plumbing the flag. */
         .extra_body = "{\"text\": {\"verbosity\": \"low\"}}",
-        /* Models the backend routes only to the official CLI check both identities. */
+        /* Backend routing can depend on client identity, so present as the official CLI: some
+         * models once failed unless both headers named it. Keep the version close to current;
+         * see "Version pins" in docs/releasing.md. */
         .extra_headers = "{\"originator\": \"codex_cli_rs\","
                          " \"User-Agent\": \"codex_cli_rs/0.144.1 hax/" HAX_VERSION "\"}",
         .probe_model = codex_probe_model,
@@ -176,11 +178,13 @@ static const struct provider_def DEFS[] = {
     {
         .id = "openai-compatible",
         .unconfigured_reason = "HAX_OPENAI_BASE_URL not set",
+        .offer_once_configured = 1,
     },
     {
         .id = "anthropic-compatible",
         .api = "anthropic-messages",
         .unconfigured_reason = "HAX_ANTHROPIC_BASE_URL not set",
+        .offer_once_configured = 1,
     },
     {
         .id = "mock",
@@ -266,6 +270,16 @@ const char *provider_catalog_id(const struct provider_def *def)
     if (configured)
         return *configured ? configured : NULL;
     return def->catalog_id;
+}
+
+int provider_offered(const struct provider_def *def)
+{
+    if (!def->offer_once_configured)
+        return 1;
+    char *key = xasprintf("providers.%s.base_url", def->id);
+    int configured = config_str_nonempty(key) != NULL;
+    free(key);
+    return configured;
 }
 
 void provider_list_names(FILE *out)

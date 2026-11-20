@@ -73,9 +73,9 @@ int spinner_format_status(struct buf *out, const char *glyph, const char *info,
         prefix_cells += (int)display_cells(safe_info);
     }
     int separator_cells = has_duration && !safe_info ? 3 : 1;
-    int include_prefix = prefix_cells > 0 &&
-                         prefix_cells + separator_cells + (int)display_cells(safe_label) <=
-                             label_budget;
+    int include_prefix =
+        prefix_cells > 0 &&
+        prefix_cells + separator_cells + (int)display_cells(safe_label) <= label_budget;
 
     buf_append_str(out, ANSI_DIM);
     buf_append_str(out, glyph ? glyph : "");

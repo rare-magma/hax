@@ -74,11 +74,11 @@ Conversation records, in order. `kind` is one of:
 | `tool_result` | The paired result: `call_id`, `output`, and optionally `images`. |
 | `reasoning` | Provider reasoning state (`reasoning_json`/`reasoning_text`) with its `provider`/`model`; `reasoning_field` names the Chat Completions field the text streamed in. |
 | `turn_boundary` | Separates provider round-trips ("turns"). The first one precedes the user prompt. |
-| `turn_usage` | Usage footer for one round-trip; see below. |
+| `turn_usage` | Token usage, timing, and cost of one round-trip; see below. |
 
 `origin` marks synthetic records: `compact_seed` (a compaction summary), `continuation`,
 `interrupted`, `skipped`, `refused`, `summarized`, `task_note` (a background-task report), and
-`compaction` (a `turn_usage` footer for a summarization request rather than an agent turn).
+`compaction` (a `turn_usage` record for a summarization request rather than an agent turn).
 Items without `origin` are ordinary typed or streamed content. `inherited: true` marks items
 `/fork` copied from the source session: context this conversation reads but did not pay for.
 
@@ -86,8 +86,8 @@ A `turn_usage` item carries `provider`, `model`, and a `usage` object: token cou
 `output`, `cached`, `cache_write`, and `in_tokens` for uncached input), `elapsed_ms`, a cost
 breakdown ending in `cost_total` (`cost_estimated: true` when derived from catalog prices), and
 provenance such as `served_model`, `route`, and `response_id`. Unknown values are omitted. One
-footer is written per request the provider served: an attempt that died mid-stream and was
-retried gets its own footer ahead of the terminal response's.
+`turn_usage` record is written per request the provider served: an attempt that died mid-stream
+and was retried gets its own record ahead of the terminal response's.
 
 ## The one-shot `--json` stream
 
@@ -114,11 +114,11 @@ records:
 | `session_id` | Resume handle for `hax --resume=ID -p`; with no prompt, the resumed run continues where this one stopped. |
 
 `interrupted` and `paused` report a stop signal (SIGINT/SIGTERM and SIGUSR1 respectively; see
-[usage.md](./usage.md#cli-modes)). A startup failure can end the stream before any result record,
-so also treat process exit as terminal. The exit status matches plain `-p`: 0 on `complete`, 130
-on a signal-caused `interrupted`, 1 otherwise. When the stream itself becomes unwritable mid-run
-(the consumer exited, the disk filled), hax stops the run and exits nonzero rather than keep
-working unobserved.
+One-shot mode in [usage.md](./usage.md#one-shot-mode)). A startup failure can end the stream before
+any result record, so also treat process exit as terminal. The exit status matches plain `-p`: 0 on
+`complete`, 130 on a signal-caused `interrupted`, 1 otherwise. When the stream itself becomes
+unwritable mid-run (the consumer exited, the disk filled), hax stops the run and exits nonzero
+rather than keep working unobserved.
 
 Example — watch tool calls and cost from a script, no state-directory knowledge needed:
 
@@ -127,5 +127,4 @@ hax --json "run the tests and fix the first failure" |
     jq 'select(.kind == "tool_call" or .type == "result")'
 ```
 
-The stream can be tried without a provider, from the repository root:
-`HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax --json go`.
+The mock provider shows the stream without credentials: `HAX_PROVIDER=mock hax --json hello`.

@@ -36,7 +36,7 @@ static const struct help_option {
      "spaces) when given, otherwise from stdin if stdin is not a terminal."},
     {"--json",
      "Non-interactive JSON output (implies -p): stream the run as JSON records on stdout, "
-     "one per line, ending with a result record. Format reference: docs/sessions.md."},
+     "one per line, ending with a result record. Format reference: hax-sessions(5)."},
     {"-c, --continue", "Resume the most recent conversation in this directory."},
     {"--resume[=ID]",
      "Resume a past conversation in this directory, restoring its recorded settings: pick "
@@ -101,7 +101,7 @@ void cli_print_help(void)
     fputc('\n', stdout);
     ui_wrapped_rows("The selection flags (--provider, --model, --effort, --preset) apply to "
                     "this run only and take priority over every other source. Configuration "
-                    "and precedence are covered in README.md.",
+                    "and precedence are covered in hax-config(5).",
                     0, columns, "");
 }
 

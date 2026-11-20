@@ -110,8 +110,9 @@ hax --resume                # pick a past session for this directory
 hax --resume=ID -p "next"   # resume a specific session in one-shot mode
 ```
 
-Run `hax --help` for CLI usage. In the REPL, type `/help` for slash commands and shortcuts.
-See [docs/usage.md](./docs/usage.md) for more detailed usage documentation.
+Run `hax --help` for CLI usage, or `man hax` where the man pages are installed. In the REPL, type
+`/help` for slash commands and shortcuts. See [docs/usage.md](./docs/usage.md) for more detailed
+usage documentation.
 
 ## Configuration
 

@@ -17,23 +17,22 @@ keys in environment variables rather than command arguments or `config.json`.
 
 ## Choosing a provider
 
-| Provider id | Best fit | Required setup |
-| --- | --- | --- |
-| `codex` | Existing ChatGPT/Codex subscription | Run `/login`. |
-| `openai` | Direct OpenAI API | `OPENAI_API_KEY`; choose a model. |
-| `anthropic` | Direct Anthropic API | `ANTHROPIC_API_KEY`; choose a model. |
-| `openrouter` | Many vendors through one API | `OPENROUTER_API_KEY`; choose a model. |
-| `opencode-zen` | Curated pay-as-you-go models | `OPENCODE_API_KEY`; choose a model. |
-| `opencode-go` | OpenCode's model subscription | `OPENCODE_API_KEY`; choose a model. |
-| `deepseek` | Direct DeepSeek API | `DEEPSEEK_API_KEY`; choose a model. |
-| `llama.cpp` | Local `llama-server` | Start the server; model is normally discovered. |
-| `ollama` | Local Ollama models | Start `ollama serve`; choose a pulled model. |
-| `openai-compatible` | OpenAI Chat Completions-compatible endpoint | Base URL; usually choose a model. |
-| `anthropic-compatible` | Anthropic Messages-compatible proxy/server | Base URL; usually choose a model. |
+| Provider | Description |
+| --- | --- |
+| `codex` | Your ChatGPT subscription, through the Codex backend. Run `/login`. |
+| `openai` | The OpenAI API. Set `OPENAI_API_KEY`. |
+| `anthropic` | The Anthropic API. Set `ANTHROPIC_API_KEY`. |
+| `openrouter` | Models from many vendors through one API. Set `OPENROUTER_API_KEY`. |
+| `opencode-zen` | OpenCode's curated pay-as-you-go models. Set `OPENCODE_API_KEY`. |
+| `opencode-go` | OpenCode's model subscription. Set `OPENCODE_API_KEY`. |
+| `deepseek` | The DeepSeek API. Set `DEEPSEEK_API_KEY`. |
+| `llama.cpp` | A local llama.cpp server. Start `llama-server`. |
+| `ollama` | A local Ollama server. Start `ollama serve` and choose a model. |
 
-When no provider is selected, hax picks the first available one in table order, then any
-user-defined providers. Auto-selection is convenient interactively; pass a provider explicitly in
-automation so a newly available backend cannot change a script's behavior.
+When no provider is selected, hax picks the first available one in table order, then a
+[one-off endpoint](#one-off-endpoints) whose base URL is set, then any custom providers.
+Auto-selection is convenient interactively; pass a provider explicitly in automation so a newly
+available backend cannot change a script's behavior.
 
 If an explicitly selected provider cannot start, the REPL opens without one and directs you to
 `/provider`; one-shot mode exits with an error. A one-shot banner on stderr identifies the provider,
@@ -67,9 +66,9 @@ response, so any `~$` amount is an API-equivalent estimate from model metadata, 
 the subscription.
 
 Codex serves some models a smaller default context window than they support — the `/model` picker
-shows the sanctioned ceiling as "272k context (up to 872k)". A
-[`catalog.models`](./configuration.md#model-metadata) override raises the window for
-one model; keying the block `codex` leaves the `openai` provider alone:
+shows the sanctioned ceiling as "272k context (up to 872k)". A `catalog.models` override (see
+Model metadata in [configuration.md](./configuration.md#model-metadata)) raises the window for one
+model; keying the block `codex` leaves the `openai` provider alone:
 
 ```json
 {
@@ -115,8 +114,8 @@ hax --provider=openrouter --model=anthropic/claude-sonnet-5
 Turn stats and `/session` show the cost OpenRouter reports; `/usage` shows API key spend and
 available credits.
 
-The [transcript](debugging.md#transcript-log) reports the upstream endpoint OpenRouter routed each
-response to, which is how to confirm that `extra_body` routing preferences took effect.
+The transcript (Ctrl-T, or the `HAX_TRANSCRIPT` file) reports the upstream endpoint OpenRouter
+routed each response to, which is how to confirm that `extra_body` routing preferences took effect.
 
 By default hax sends app attribution (`HTTP-Referer`, `X-Title`, `X-OpenRouter-Categories`) and
 the conversation id as `x-session-id`, which OpenRouter uses for sticky routing and to group the
@@ -177,7 +176,7 @@ opt-out before sending proprietary code.
 `llama.cpp` connects to a local `llama-server`, by default at `http://127.0.0.1:9931/v1`:
 
 ```sh
-llama-server -m /path/to/model.gguf -c 32768
+llama-server -m /path/to/model.gguf
 hax --provider=llama.cpp
 ```
 
@@ -194,9 +193,9 @@ server's catalog with load state, context size, and image capability. Selecting 
 loading it in the background, which can take a while; hax never loads a model you did not select.
 With `--no-models-autoload`, load models through llama.cpp's own tooling and pick a running one.
 
-Start the server with a context large enough for an agent session; the llama.cpp default is often
-too small once system instructions, project context, tool results, and the desired output are
-combined.
+hax reads the context size the server is running with, so no `context_limit` is needed.
+`llama-server` can choose a small one, for example to fit device memory; if it is too small for an
+agent session, restart the server with a larger `-c` / `--ctx-size`.
 
 ## Ollama
 
@@ -225,51 +224,6 @@ Override the endpoint in `config.json` — `port` for another local port, or a f
   }
 }
 ```
-
-## Compatible endpoints
-
-`openai-compatible` and `anthropic-compatible` connect to a generic endpoint you name at run time.
-Their `providers.openai-compatible` / `providers.anthropic-compatible` blocks take the same fields
-as a [custom provider](#custom-providers), and the common keys also have environment variables, so
-a one-off endpoint needs no config file. The variables affect only these two providers; the full key
-list is in [configuration.md](./configuration.md#provider-settings).
-
-### OpenAI-compatible
-
-Use this for an endpoint implementing OpenAI Chat Completions:
-
-```sh
-HAX_PROVIDER=openai-compatible \
-HAX_OPENAI_DISPLAY_NAME=vLLM \
-HAX_OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
-HAX_MODEL=Qwen3-30B \
-hax
-```
-
-`HAX_OPENAI_BASE_URL` is required. If authentication is needed, use `HAX_OPENAI_API_KEY`; hax does
-not fall back to `OPENAI_API_KEY` for compatible endpoints. The default request protocol is Chat
-Completions; set `HAX_OPENAI_API=responses` for a Responses endpoint. Set
-`HAX_OPENAI_REASONING_FORMAT=nested` only when the server expects `reasoning: {"effort": ...}`
-instead of a flat `reasoning_effort` field.
-
-### Anthropic-compatible
-
-Use this for an endpoint implementing Anthropic Messages:
-
-```sh
-HAX_PROVIDER=anthropic-compatible \
-HAX_ANTHROPIC_BASE_URL=http://127.0.0.1:18080/v1 \
-HAX_MODEL=local-model \
-hax
-```
-
-`HAX_ANTHROPIC_BASE_URL` is required. Use `HAX_ANTHROPIC_API_KEY` when authentication is needed; hax
-does not fall back to `ANTHROPIC_API_KEY`. Compatible endpoints get the first-party thinking and
-prompt-cache defaults, except that a model the catalog does not list falls back to budget
-thinking. Override `thinking_mode` or `cache` when an endpoint needs it.
-
-For a static endpoint you use regularly, prefer a named custom provider instead of repeatedly
-exporting the generic base URL.
 
 ## Custom providers
 
@@ -310,6 +264,7 @@ Common fields:
 | `metadata_api` | `/models` dialect: `openai` (flat list) or `anthropic` (paginated); defaults to the request protocol's family. |
 | `extra_body` | Raw JSON members merged into every request body ([below](#request-passthrough)). |
 | `extra_headers` | HTTP headers sent on every request ([below](#request-passthrough)). |
+| `overflow_phrases` | Phrases in this provider's error messages that mean the conversation exceeds the model's context window, for servers whose wording hax does not already recognize. |
 
 A custom provider has no catalog identity until `catalog_id` names one, so a block for a local
 server or a private proxy never contacts models.dev. Set it to the models.dev provider id (for
@@ -334,8 +289,8 @@ Advanced fields depend on the protocol:
 | `openai-responses` | `send_cache_key` |
 | `anthropic-messages` | `max_tokens`, `thinking_mode`, `thinking_budget`, `cache`, `cache_ttl`, `version` |
 
-Their values and defaults are listed under
-[Provider settings](./configuration.md#provider-settings). Leave them unset unless the endpoint
+Their values and defaults are listed under Provider settings in
+[configuration.md](./configuration.md#provider-settings). Leave them unset unless the endpoint
 documents a need; selecting a provider warns about block members hax does not recognize or that its
 `api` does not use.
 
@@ -345,11 +300,37 @@ different field, or to `off` for one that rejects it. Turn `reasoning_required` 
 that rejects tool calls without their reasoning, such as a proxy to DeepSeek without a
 `catalog_id`; it takes effect once the field is known from `catalog_id` or `reasoning_roundtrip`.
 
-Every provider reads only its own block. The `HAX_OPENAI_*` and `HAX_ANTHROPIC_*` variables belong
-to the shipped `openai-compatible` / `anthropic-compatible` blocks and do not bleed into others;
-for a custom provider, only the variable named by `api_key_env` is read. Provider names cannot
-contain `.`; a block named after a shipped provider configures that provider rather than
-replacing it.
+Every provider reads only its own block; for a custom provider, the only environment variable read
+is the one named by `api_key_env`. Provider names cannot contain `.`; a block named after a shipped
+provider configures that provider rather than replacing it.
+
+### One-off endpoints
+
+For a quick test or a script, `openai-compatible` and `anthropic-compatible` reach an endpoint named
+entirely at run time, with no config file. Each takes the same fields as a custom provider, and its
+common fields also have environment variables, listed under Provider settings in
+[configuration.md](./configuration.md#provider-settings). `/provider` offers them only once their
+base URL is set.
+
+```sh
+HAX_PROVIDER=openai-compatible \
+HAX_OPENAI_DISPLAY_NAME=vLLM \
+HAX_OPENAI_BASE_URL=http://127.0.0.1:8000/v1 \
+HAX_MODEL=Qwen3-30B \
+hax
+```
+
+`openai-compatible` requires `HAX_OPENAI_BASE_URL` and sends Chat Completions requests; set
+`HAX_OPENAI_API=responses` for a Responses endpoint. Set `HAX_OPENAI_REASONING_FORMAT=nested` only
+when the server expects `reasoning: {"effort": ...}` instead of a flat `reasoning_effort` field.
+
+`anthropic-compatible` requires `HAX_ANTHROPIC_BASE_URL` and sends Messages requests. It gets the
+first-party thinking and prompt-cache defaults, except that a model the catalog does not list falls
+back to budget thinking. Override `thinking_mode` or `cache` when an endpoint needs it.
+
+For authentication, set `HAX_OPENAI_API_KEY` or `HAX_ANTHROPIC_API_KEY`; hax does not fall back to
+`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. The `HAX_OPENAI_*` and `HAX_ANTHROPIC_*` variables
+configure only these two providers.
 
 ### Request passthrough
 
@@ -378,7 +359,10 @@ survives restarts, while `/new` starts a fresh one — for gateways that route o
   "providers": {
     "openrouter": {
       "extra_body": {
-        "provider": { "order": ["baseten"], "allow_fallbacks": false }
+        "provider": {
+          "order": ["baseten"],
+          "allow_fallbacks": false
+        }
       }
     },
     "gateway": {
@@ -403,12 +387,14 @@ literally into a header value — one more reason to prefer `$VAR`.
 
 ## Mock provider
 
-`mock` is a development backend with no network or model. It is hidden from auto-selection and the
-provider picker but can be selected explicitly:
+`mock` is a development backend with no network or model; without a script it echoes the prompt
+back. It is hidden from auto-selection and the provider picker but can be selected explicitly,
+which is handy for trying the interface or the `--json` stream without credentials:
 
 ```sh
 HAX_PROVIDER=mock hax
-HAX_PROVIDER=mock HAX_MOCK_SCRIPT=scripts/mock/demo.txt hax
 ```
 
-See [Troubleshooting and development diagnostics](./debugging.md#mock-provider) for its script format.
+Mock runs record no session unless `HAX_NO_SESSION=0` is set. `HAX_MOCK_SCRIPT` names a script of
+canned turns to replay instead; the format is described in `docs/debugging.md` in the hax source
+tree.
